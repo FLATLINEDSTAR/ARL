@@ -2,6 +2,7 @@
 
 from adaptive_rl.algorithms.base import BaseAlgorithm
 from adaptive_rl.algorithms.ppo import PPOAlgorithm
+from adaptive_rl.algorithms.random_policy import RandomPolicy
 from adaptive_rl.algorithms.registry import (
     AlgorithmMetadata,
     AlgorithmRegistry,
@@ -20,6 +21,7 @@ __all__ = [
     "AlgorithmRegistryError",
     "BaseAlgorithm",
     "PPOAlgorithm",
+    "RandomPolicy",
     "algorithm_registry",
     "get_algorithm_factory",
     "get_algorithm_metadata",
