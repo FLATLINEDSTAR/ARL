@@ -15,6 +15,9 @@ from adaptive_rl.gui.visualizer import (
     _generate_box_wireframe,
     _generate_sphere_surface,
     build_arena_3d_figure,
+    build_comparison_bar_chart,
+    build_density_experiment_figure,
+    build_training_curve_figure,
     get_available_models,
     run_drone_simulation_episode,
 )
@@ -102,3 +105,58 @@ def test_get_available_models(tmp_path: Path) -> None:
     """Verify scanning for model checkpoints."""
     models = get_available_models()
     assert isinstance(models, list)
+
+
+def test_build_training_curve_figure() -> None:
+    """Verify training curve Plotly figure generation."""
+    rewards = [10.0, 15.0, 12.0, 25.0, 30.0, 45.0, 50.0, 60.0, 75.0, 80.0, 90.0]
+    fig = build_training_curve_figure(rewards, window_size=5)
+    assert isinstance(fig, go.Figure)
+    trace_names = [trace.name for trace in fig.data if hasattr(trace, "name")]
+    assert "Episode Return" in trace_names
+    assert "Moving Avg (w=5)" in trace_names
+
+
+def test_build_comparison_bar_chart() -> None:
+    """Verify comparison bar chart generation between policies."""
+    from adaptive_rl.evaluation.metrics import EvaluationMetrics
+
+    m_ppo = EvaluationMetrics(
+        episodes=10,
+        mean_reward=50.0,
+        std_reward=5.0,
+        min_reward=40.0,
+        max_reward=60.0,
+        success_rate=0.7,
+        collision_rate=0.2,
+        mean_episode_length=35.0,
+        std_episode_length=4.0,
+    )
+    m_rand = EvaluationMetrics(
+        episodes=10,
+        mean_reward=-40.0,
+        std_reward=10.0,
+        min_reward=-80.0,
+        max_reward=-10.0,
+        success_rate=0.0,
+        collision_rate=0.9,
+        mean_episode_length=15.0,
+        std_episode_length=3.0,
+    )
+    fig = build_comparison_bar_chart({"PPO": m_ppo, "Random Policy": m_rand})
+    assert isinstance(fig, go.Figure)
+    assert len(fig.data) == 2
+
+
+def test_build_density_experiment_figure() -> None:
+    """Verify obstacle density experiment figure generation."""
+    data = [
+        {"obstacle_count": 4, "success_rate": 0.8, "collision_rate": 0.1, "mean_reward": 60.0},
+        {"obstacle_count": 6, "success_rate": 0.5, "collision_rate": 0.4, "mean_reward": 20.0},
+        {"obstacle_count": 8, "success_rate": 0.3, "collision_rate": 0.6, "mean_reward": -10.0},
+    ]
+    fig = build_density_experiment_figure(data)
+    assert isinstance(fig, go.Figure)
+    trace_names = [trace.name for trace in fig.data if hasattr(trace, "name")]
+    assert "Success Rate (%)" in trace_names
+    assert "Collision Rate (%)" in trace_names

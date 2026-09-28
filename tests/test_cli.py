@@ -19,6 +19,7 @@ def test_cli_help() -> None:
     assert "evaluate" in result.output
     assert "demo-drone" in result.output
     assert "gui" in result.output
+    assert "experiment-density" in result.output
     assert "config" in result.output
     assert "env" in result.output
 
@@ -31,6 +32,16 @@ def test_cli_gui_help() -> None:
     assert "--port" in clean_output
     assert "--host" in clean_output
     assert "Streamlit" in clean_output
+
+
+def test_cli_experiment_density_help() -> None:
+    """Verify adaptive-rl experiment-density --help displays options."""
+    result = runner.invoke(app, ["experiment-density", "--help"])
+    assert result.exit_code == 0
+    clean_output = re.sub(r"\x1b\[[0-9;]*[a-zA-Z]", "", result.output)
+    assert "--model" in clean_output
+    assert "--episodes" in clean_output
+    assert "--seed" in clean_output
 
 
 def test_cli_version() -> None:
@@ -127,12 +138,31 @@ log_dir: "{tmp_path / "logs"}"
             "2",
             "--output-report",
             str(eval_report),
+            "--compare-random",
         ],
     )
     assert eval_res.exit_code == 0
     assert "## Evaluation" in eval_res.output
-    assert "Success rate:" in eval_res.output
+    assert "Policy Comparison" in eval_res.output
     assert eval_report.exists()
+
+    # 2b. Experiment-density command
+    density_report = tmp_path / "density_test.json"
+    dense_res = runner.invoke(
+        app,
+        [
+            "experiment-density",
+            "--model",
+            str(model_file),
+            "--episodes",
+            "1",
+            "--output-report",
+            str(density_report),
+        ],
+    )
+    assert dense_res.exit_code == 0
+    assert "Obstacle-Density Results" in dense_res.output
+    assert density_report.exists()
 
     # 3. Demo-drone command
     demo_res = runner.invoke(

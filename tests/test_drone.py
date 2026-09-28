@@ -334,3 +334,36 @@ def test_drone_evaluator_benchmarking(tmp_path: Path) -> None:
     report_data = json.loads(report_path.read_text(encoding="utf-8"))
     assert report_data["episodes"] == 4
     env.close()
+
+
+def test_drone_obstacle_counts_scaling() -> None:
+    """Verify drone environment handles varying obstacle counts (4, 6, 8)."""
+    for count in [4, 6, 8]:
+        env = DroneNavigation3DEnv(bounds=(30.0, 30.0, 15.0), num_obstacles=count)
+        obs, info = env.reset(seed=42)
+        assert obs.shape == (29,)
+        assert len(env._obstacles) == count
+        act = env.action_space.sample()
+        next_obs, reward, terminated, truncated, step_info = env.step(act)
+        assert next_obs.shape == (29,)
+        assert isinstance(reward, float)
+        env.close()
+
+
+def test_drone_random_rollout_lifecycle() -> None:
+    """Verify complete episode rollout using random actions terminates or truncates cleanly."""
+    env = DroneNavigation3DEnv(bounds=(25.0, 25.0, 12.0), max_steps=30, num_obstacles=3)
+    obs, info = env.reset(seed=99)
+    done = False
+    step_count = 0
+
+    while not done:
+        action = env.action_space.sample()
+        obs, reward, term, trunc, step_info = env.step(action)
+        step_count += 1
+        done = term or trunc
+
+    assert step_count <= 30
+    assert "position" in step_info
+    assert "distance_to_goal" in step_info
+    env.close()
