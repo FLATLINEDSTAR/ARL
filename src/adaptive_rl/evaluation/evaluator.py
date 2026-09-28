@@ -5,12 +5,14 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import gymnasium as gym
 import numpy as np
 
 from adaptive_rl.algorithms.base import BaseAlgorithm
+from adaptive_rl.algorithms.random_policy import RandomPolicy
+from adaptive_rl.environments.drone import DroneNavigation3DEnv
 from adaptive_rl.environments.registry import make_env
 from adaptive_rl.evaluation.metrics import EvaluationMetrics
 
@@ -173,7 +175,158 @@ class Evaluator:
             self.env.close()
 
 
+def evaluate_random_policy(
+    env: Optional[gym.Env] = None,
+    num_episodes: int = 20,
+    base_seed: Optional[int] = 42,
+) -> EvaluationMetrics:
+    """Evaluate an untrained uniform-random action baseline policy under controlled seeds.
+
+    Args:
+        env: Optional Gymnasium environment instance (defaults to standard DroneNavigation3DEnv).
+        num_episodes: Total evaluation episodes to run.
+        base_seed: Deterministic base seed.
+
+    Returns:
+        EvaluationMetrics containing empirical benchmark metrics.
+    """
+    close_env = False
+    if env is None:
+        env = DroneNavigation3DEnv()
+        close_env = True
+    try:
+        policy = RandomPolicy(action_space=env.action_space, seed=base_seed)
+        evaluator = Evaluator(algorithm=policy, env=env)
+        return evaluator.evaluate(
+            num_episodes=num_episodes,
+            deterministic=False,
+            base_seed=base_seed,
+        )
+    finally:
+        if close_env:
+            env.close()
+
+
+def evaluate_ppo_policy(
+    algorithm: BaseAlgorithm,
+    env: Optional[gym.Env] = None,
+    num_episodes: int = 20,
+    base_seed: Optional[int] = 42,
+    deterministic: bool = True,
+) -> EvaluationMetrics:
+    """Evaluate a trained PPO policy under controlled benchmark seeds.
+
+    Args:
+        algorithm: Initialized or loaded PPOAlgorithm wrapper.
+        env: Optional Gymnasium environment instance (defaults to standard DroneNavigation3DEnv).
+        num_episodes: Total evaluation episodes to run.
+        base_seed: Deterministic base seed.
+        deterministic: Whether to use deterministic mode.
+
+    Returns:
+        EvaluationMetrics containing empirical benchmark metrics.
+    """
+    close_env = False
+    if env is None:
+        env = DroneNavigation3DEnv()
+        close_env = True
+    try:
+        evaluator = Evaluator(algorithm=algorithm, env=env)
+        return evaluator.evaluate(
+            num_episodes=num_episodes,
+            deterministic=deterministic,
+            base_seed=base_seed,
+        )
+    finally:
+        if close_env:
+            env.close()
+
+
+def compare_policies(
+    ppo_algorithm: BaseAlgorithm,
+    random_policy: Optional[BaseAlgorithm] = None,
+    env: Optional[gym.Env] = None,
+    num_episodes: int = 20,
+    base_seed: Optional[int] = 42,
+) -> Dict[str, EvaluationMetrics]:
+    """Execute head-to-head evaluation between trained PPO and Random baseline under identical seeds."""
+    close_env = False
+    if env is None:
+        env = DroneNavigation3DEnv()
+        close_env = True
+    try:
+        if random_policy is None:
+            random_policy = RandomPolicy(action_space=env.action_space, seed=base_seed)
+
+        ppo_eval = Evaluator(algorithm=ppo_algorithm, env=env)
+        ppo_metrics = ppo_eval.evaluate(
+            num_episodes=num_episodes,
+            deterministic=True,
+            base_seed=base_seed,
+        )
+
+        rand_eval = Evaluator(algorithm=random_policy, env=env)
+        rand_metrics = rand_eval.evaluate(
+            num_episodes=num_episodes,
+            deterministic=False,
+            base_seed=base_seed,
+        )
+
+        return {
+            "PPO": ppo_metrics,
+            "Random Policy": rand_metrics,
+        }
+    finally:
+        if close_env:
+            env.close()
+
+
+def run_obstacle_density_experiment(
+    algorithm: BaseAlgorithm,
+    obstacle_counts: Sequence[int] = (4, 6, 8),
+    episodes_per_density: int = 10,
+    base_seed: int = 42,
+    bounds: Tuple[float, float, float] = (30.0, 30.0, 15.0),
+    output_path: Optional[str | Path] = None,
+) -> List[Dict[str, Any]]:
+    """Evaluate a trained agent across varied obstacle densities (e.g. 4, 6, 8 obstacles)."""
+    results: List[Dict[str, Any]] = []
+
+    for count in obstacle_counts:
+        env = DroneNavigation3DEnv(bounds=bounds, num_obstacles=count)
+        try:
+            evaluator = Evaluator(algorithm=algorithm, env=env)
+            metrics = evaluator.evaluate(
+                num_episodes=episodes_per_density,
+                deterministic=True,
+                base_seed=base_seed,
+            )
+            entry: Dict[str, Any] = {
+                "obstacle_count": int(count),
+                "episodes": int(episodes_per_density),
+                "success_rate": round(float(metrics.success_rate or 0.0), 4),
+                "collision_rate": round(float(metrics.collision_rate or 0.0), 4),
+                "mean_reward": round(float(metrics.mean_reward), 2),
+                "mean_episode_length": round(float(metrics.mean_episode_length), 2),
+            }
+            results.append(entry)
+        finally:
+            env.close()
+
+    if output_path is not None:
+        target = Path(output_path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with open(target, "w", encoding="utf-8") as f:
+            json.dump(results, f, indent=2)
+
+    return results
+
+
 __all__ = [
     "EpisodeEvaluationRecord",
     "Evaluator",
+    "compare_policies",
+    "evaluate_ppo_policy",
+    "evaluate_random_policy",
+    "run_obstacle_density_experiment",
 ]
