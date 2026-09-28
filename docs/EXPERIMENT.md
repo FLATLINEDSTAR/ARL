@@ -332,3 +332,69 @@ adaptive-rl experiment-ablation --timesteps 500 --episodes 5 --seed 42
 Outputs are automatically exported to:
 - `artifacts/benchmarks/reward_ablation.json` (detailed per-variant results and configuration metadata)
 - `artifacts/benchmarks/reward_ablation.csv` (tabular benchmark data for analysis)
+
+---
+
+## 7. Experiment Manifest & Software Provenance
+
+### Overview
+To ensure scientific reproducibility, every training run automatically generates a machine-readable experiment manifest (`experiment.json` and `{name}_manifest.json`). The manifest records full environmental, algorithmic, and software provenance alongside trained models and evaluation artifacts, establishing a verifiable audit trail for published results.
+
+### Manifest File Locations
+Upon completion of `RLTrainer.fit()`, the manifest is written atomically to:
+- Primary metadata path: `artifacts/metadata/{name}_manifest.json`
+- Experiment directory: `artifacts/experiments/{name}/experiment.json`
+
+### Manifest Schema & Sections
+
+The manifest adheres to a strict Pydantic schema (`ExperimentManifest`) with the following sections:
+
+| Section | Key Fields | Description |
+|---|---|---|
+| **Schema** | `manifest_version` | Schema version string (e.g. `"1.0.0"`). |
+| **Identity** | `experiment_name` | Name of the experiment (e.g. `"drone_ppo"`). |
+| **Git Provenance** | `git_commit`, `git_branch`, `git_dirty` | Exact commit SHA-1 hash, active branch (or `"detached"`), and boolean flag indicating whether uncommitted modifications exist. Gracefully set to `"unknown"` if Git is unavailable or running outside a repository. |
+| **Host System** | `os_name`, `os_version`, `python_version`, `architecture` | Host OS (`Linux`, `Darwin`, `Windows`), kernel release, Python interpreter version (`3.10.x`), and CPU machine architecture (`x86_64`, `aarch64`). |
+| **Packages** | `adaptive_rl`, `torch`, `sb3`, `gymnasium`, `numpy`, `typer`, `pydantic` | Exact installed dependency versions retrieved via standard library `importlib.metadata` without importing heavy modules. |
+| **Hardware** | `device`, `cuda_device_name`, `cpu_count` | Compute device actually utilized (`cpu` or `cuda`), CUDA GPU model name (if GPU was actively used), and logical CPU core count. |
+| **Execution** | `started_at`, `finished_at`, `duration_seconds`, `command` | ISO 8601 UTC timestamps, elapsed execution duration in seconds, and sanitized command line invocation. |
+| **Experiment Config** | `algorithm`, `seed`, `training_budget`, `environment_name`, `config`, `config_sha256` | Complete deserialized `ExperimentConfig` dictionary, random seed, and deterministic SHA-256 fingerprint of the configuration. |
+| **Artifact Provenance** | `artifacts` (`path`, `sha256`, `size_bytes`, `artifact_type`) | List of all generated files (`.zip` model weights, `.json` metadata, checkpoints) with relative paths and cryptographic SHA-256 integrity digests computed via streaming reads. |
+
+### Security & Sanitization Guarantees
+- **Strict Allowlisting**: The manifest generator never dumps `os.environ`. Sensitive environment variables (e.g. API keys, access tokens, credentials) never enter the payload.
+- **Credential Masking**: Command lines and nested configuration parameters matching sensitive patterns (`key`, `token`, `secret`, `password`, `auth`) are automatically masked as `***`.
+- **Path Privacy**: Absolute home directory paths (`/home/<user>/...`) are replaced with workspace-relative paths or `~/` to prevent leaking private workstation directory layouts.
+
+### Inspecting a Manifest via CLI
+You can inspect and validate any generated manifest using the `inspect manifest` command:
+
+```bash
+# Inspect manifest from metadata directory
+adaptive-rl inspect manifest artifacts/metadata/drone_ppo_manifest.json
+
+# Inspect manifest from experiment directory
+adaptive-rl inspect manifest artifacts/experiments/drone_ppo/experiment.json
+```
+
+Example CLI summary output:
+```text
+╭─ Experiment Manifest: drone_ppo_manifest.json ──────────────────────────────╮
+│ ✓ Experiment Manifest is valid!                                             │
+│                                                                             │
+│ • Experiment: drone_ppo                                                     │
+│ • Algorithm: PPO (Seed: 42)                                                 │
+│ • Git: c0a88f5 (branch: main, clean)                                        │
+│ • Host: Linux 6.6.137+ (Python 3.10.12, x86_64)                             │
+│ • Hardware: cpu                                                             │
+│ • Packages: adaptive_rl 0.1.0, torch 2.14.0, sb3 2.9.0, gym 1.3.0 ...       │
+│ • Execution: Started 2026-09-28T20:15:00+00:00 (Duration: 25.40s)           │
+│ • Command: adaptive-rl train --config configs/drone_ppo.yaml                │
+│ • Artifacts (2):                                                            │
+│   • models/drone_ppo_final.zip (e3b0c44298fc...)                            │
+│   • metadata/drone_ppo_training.json (a948904f2f0f...)                      │
+╰─────────────────────────────────────────────────────────────────────────────╯
+```
+
+### Reproducibility Note
+The manifest records complete experimental provenance and cryptographic verification checksums for auditing. While this allows exact recreation of software environments, configurations, and random seeds, reinforcement learning optimization is not guaranteed to be bit-for-bit reproducible across different hardware architectures, operating systems, or CUDA driver versions due to non-deterministic GPU kernel reductions.

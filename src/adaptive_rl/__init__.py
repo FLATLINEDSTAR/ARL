@@ -22,6 +22,13 @@ from adaptive_rl.config import (
     load_config,
     save_config,
 )
+from adaptive_rl.manifest import (
+    ExperimentManifest,
+    ManifestError,
+    generate_manifest,
+    load_manifest,
+    save_manifest,
+)
 from adaptive_rl.metrics import (
     DefaultOutcomePolicy,
     EpisodeMetrics,
@@ -44,10 +51,15 @@ __all__ = [
     "EpisodeMetricsAccumulator",
     "EvaluationConfig",
     "ExperimentConfig",
+    "ExperimentManifest",
+    "ManifestError",
     "OutcomePolicy",
     "TrainingConfig",
     "compute_rate",
     "extract_episode_metrics",
+    "generate_manifest",
     "load_config",
+    "load_manifest",
     "save_config",
+    "save_manifest",
 ]

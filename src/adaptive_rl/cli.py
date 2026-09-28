@@ -47,6 +47,13 @@ env_app = typer.Typer(
 )
 app.add_typer(env_app, name="env")
 
+inspect_app = typer.Typer(
+    name="inspect",
+    help="Inspection commands for experiment manifests, environments, and artifacts.",
+    no_args_is_help=True,
+)
+app.add_typer(inspect_app, name="inspect")
+
 benchmark_app = typer.Typer(
     name="benchmark",
     help="Benchmarking and comparative evaluation commands.",
@@ -149,6 +156,78 @@ def inspect_env(
         raise typer.Exit(code=1)
 
 
+@inspect_app.command(name="manifest")
+def inspect_manifest(
+    path: Path = typer.Argument(..., help="Path to experiment manifest JSON file to inspect"),
+) -> None:
+    """Inspect and validate an experiment provenance manifest."""
+    if not path.is_file():
+        console.print(f"[bold red]Manifest file not found:[/bold red] {path}")
+        raise typer.Exit(code=1)
+
+    from adaptive_rl.manifest import ManifestError, load_manifest
+
+    try:
+        manifest = load_manifest(path)
+    except ManifestError as err:
+        console.print(f"[bold red]Manifest validation error:[/bold red] {err}")
+        raise typer.Exit(code=1)
+    except Exception as err:
+        console.print(f"[bold red]Failed to load manifest:[/bold red] {err}")
+        raise typer.Exit(code=1)
+
+    git_info = (
+        f"{manifest.git.git_commit[:8]} (branch: {manifest.git.git_branch or 'unknown'}, "
+        f"{'dirty' if manifest.git.git_dirty else 'clean'})"
+    )
+    hw_info = manifest.hardware.device
+    if manifest.hardware.cuda_device_name:
+        hw_info += f" ({manifest.hardware.cuda_device_name})"
+
+    duration_str = (
+        f"{manifest.execution.duration_seconds:.2f}s"
+        if manifest.execution.duration_seconds is not None
+        else "N/A"
+    )
+
+    pkgs = [
+        f"{name} {ver}"
+        for name, ver in [
+            ("adaptive_rl", manifest.packages.adaptive_rl),
+            ("torch", manifest.packages.torch),
+            ("sb3", manifest.packages.stable_baselines3),
+            ("gym", manifest.packages.gymnasium),
+            ("numpy", manifest.packages.numpy),
+        ]
+        if ver is not None
+    ]
+    pkg_str = ", ".join(pkgs) if pkgs else "None"
+
+    artifacts_lines = []
+    for art in manifest.artifacts[:5]:
+        artifacts_lines.append(f"  • {art.path} [dim]({art.sha256[:12]}...)[/dim]")
+    if len(manifest.artifacts) > 5:
+        artifacts_lines.append(f"  • ... and {len(manifest.artifacts) - 5} more artifact(s)")
+    art_block = "\n" + "\n".join(artifacts_lines) if artifacts_lines else " None"
+
+    console.print(
+        Panel.fit(
+            f"[bold green]✓ Experiment Manifest is valid![/bold green]\n\n"
+            f"• [bold]Experiment:[/bold] {manifest.experiment_name}\n"
+            f"• [bold]Algorithm:[/bold] {manifest.experiment.algorithm.upper()} (Seed: {manifest.experiment.seed})\n"
+            f"• [bold]Git:[/bold] {git_info}\n"
+            f"• [bold]Host:[/bold] {manifest.host.os_name} {manifest.host.os_version} (Python {manifest.host.python_version}, {manifest.host.architecture})\n"
+            f"• [bold]Hardware:[/bold] {hw_info}\n"
+            f"• [bold]Packages:[/bold] {pkg_str}\n"
+            f"• [bold]Execution:[/bold] Started {manifest.execution.started_at} (Duration: {duration_str})\n"
+            f"• [bold]Command:[/bold] {manifest.execution.command or 'N/A'}\n"
+            f"• [bold]Artifacts ({len(manifest.artifacts)}):[/bold]{art_block}",
+            title=f"Experiment Manifest: {path.name}",
+            border_style="green",
+        )
+    )
+
+
 @app.command()
 def train(
     config: Optional[Path] = typer.Option(
@@ -230,7 +309,8 @@ def train(
                 f"• [bold]Episodes Completed:[/bold] {result.episodes_completed}\n"
                 f"• [bold]Mean Reward (last window):[/bold] {result.mean_reward:.2f}\n"
                 f"• [bold]Saved Model:[/bold] {result.final_model_path}\n"
-                f"• [bold]Metadata:[/bold] {result.metadata_path}",
+                f"• [bold]Metadata:[/bold] {result.metadata_path}\n"
+                f"• [bold]Manifest:[/bold] {result.manifest_path}",
                 title="Training Summary",
                 border_style="green",
             )

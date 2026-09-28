@@ -56,6 +56,7 @@ class TrainingResult:
     collision_rate: Optional[float] = None
     metadata_path: Optional[Path] = None
     training_time_seconds: float = 0.0
+    manifest_path: Optional[Path] = None
 
 
 class RLTrainer:
@@ -192,6 +193,41 @@ class RLTrainer:
         with open(metadata_path, "w", encoding="utf-8") as f:
             json.dump(meta_dict, f, indent=2)
 
+        # Collect produced artifacts for provenance manifest
+        artifact_list: List[Path] = []
+        if final_model_path.is_file():
+            artifact_list.append(final_model_path)
+        if metadata_path.is_file():
+            artifact_list.append(metadata_path)
+        for cp in self.checkpoint_manager.list_checkpoints():
+            if isinstance(cp, dict) and "path" in cp:
+                cp_file = Path(cp["path"])
+                if cp_file.is_file():
+                    artifact_list.append(cp_file)
+
+        # Detect compute device from algorithm model if present
+        algo_model = getattr(self.algorithm, "model", None)
+        algo_device = str(getattr(algo_model, "device", getattr(self.algorithm, "device", "cpu")))
+
+        from adaptive_rl.manifest import generate_manifest, save_manifest
+
+        manifest = generate_manifest(
+            config=self.config,
+            started_at=started_at,
+            finished_at=finished_at,
+            artifacts=artifact_list,
+            device=algo_device,
+            base_dir=self.config.output_dir,
+        )
+
+        manifest_path = metadata_dir / f"{self.config.name}_manifest.json"
+        save_manifest(manifest, manifest_path, atomic=True)
+
+        # Also write canonical experiment.json in experiment directory
+        exp_dir = self.config.output_dir / "experiments" / self.config.name
+        exp_dir.mkdir(parents=True, exist_ok=True)
+        save_manifest(manifest, exp_dir / "experiment.json", atomic=True)
+
         return TrainingResult(
             experiment_name=self.config.name,
             total_timesteps=self.config.training.total_timesteps,
@@ -205,6 +241,7 @@ class RLTrainer:
             collision_rate=self.metric_logger.collision_rate,
             metadata_path=metadata_path,
             training_time_seconds=training_time_seconds,
+            manifest_path=manifest_path,
         )
 
     def close(self) -> None:
