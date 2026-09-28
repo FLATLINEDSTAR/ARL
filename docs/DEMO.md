@@ -103,5 +103,5 @@ adaptive-rl gui
    - Run 10-20 deterministic evaluation episodes.
    - Inspect the interactive return distribution chart and metrics summary.
 4. **Architecture Panel**:
-   - Walk evaluators through the 3D kinematic equations, 22-dimensional observation vector, and reward formulation.
+   - Walk evaluators through the 3D kinematic equations, 29-dimensional observation vector, and reward formulation.
 

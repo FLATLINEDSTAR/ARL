@@ -4,29 +4,32 @@ AdaptiveRL is structured around a minimal, modular pipeline consisting of four p
 
 ```text
 src/adaptive_rl/
-├── environments/      # 3D kinematic drone navigation environment (Gymnasium)
+├── environments/      # 3D kinematic drone, 6-DOF rigid-body quadrotor, & disturbed drone (Gymnasium)
 ├── algorithms/        # RL algorithm registry and wrappers (Stable-Baselines3 PPO & SAC)
 ├── planners/          # Classical motion-planning baselines (A* 3D lattice planner)
 ├── training/          # Unified RL training loop (RLTrainer/PPOTrainer), checkpointing, and artifact export
 ├── evaluation/        # Multi-episode deterministic evaluator, policy comparison, and metrics
 ├── benchmarking/      # Controlled ablations and cross-algorithm benchmarking (PPO vs SAC)
+├── experiments/       # Preregistered online adaptation vs fixed shift runner (Protocol v2.0)
+├── manifest.py        # Reproducibility metadata manifest generator (Git, OS, hardware, hashes)
 ├── config.py          # Strongly typed Pydantic configuration schemas
 └── cli.py             # User-facing Typer CLI application
 ```
 
 ## Component Details
 
-### 1. Environment (`adaptive_rl.environments.drone`)
-- Implements `DroneNavigation3DEnv` conforming to the Gymnasium `Env` interface.
-- State: 3D position $p \in \mathbb{R}^3$, 3D velocity $v \in \mathbb{R}^3$, target coordinate $g \in \mathbb{R}^3$, and obstacle positions.
-- Observations: 29-dimensional normalized vector:
+### 1. Environments (`adaptive_rl.environments`)
+- **`DroneNavigation3DEnv` (`drone`, `drone_3d`)**: Point-mass 3-DOF kinematic translation with semi-implicit Euler stepping and linear aerodynamic drag ($c_{\text{drag}} = 0.05$).
+- **`Drone6DOFEnv` (`drone-6dof`, `drone_6dof`)**: Rigid-body 6-DOF quadrotor dynamics with quaternion attitude kinematics, Euler rotational equations, 4-rotor "X" configuration thrusts, and RK4 multi-substep numerical integration.
+- **`DroneDisturbed3DEnv` (`drone_disturbed`, `drone_disturbance`)**: 3D drone navigation subject to steady prevailing wind, stochastic Ornstein-Uhlenbeck (OU) gusts, moving dynamic obstacles with boundary reflection, and step-indexed disturbance recovery tracking.
+- **Observations (Standard 29 Dims)**:
   - Relative target vector (3 dims)
   - Drone velocity (3 dims)
   - Normalized drone position (3 dims)
   - Normalized target position (3 dims)
   - Target distance scalar (1 dim)
-  - 16-ray spherical LiDAR rangefinder readings (16 dims)
-- Actions: 3-dimensional continuous thrust acceleration $a \in [-1.0, 1.0]^3$.
+  - 16-ray spherical LiDAR rangefinder readings (16 dims) with configurable Gaussian noise and dropout.
+- **Actions**: Continuous 3D acceleration commands $a \in [-1.0, 1.0]^3$ (or 4-motor thrusts in 6-DOF).
 
 ### 2. Algorithms & Training (`adaptive_rl.algorithms`, `adaptive_rl.training`)
 - **PPO (`PPOAlgorithm`)**: On-policy actor-critic algorithm wrapped from Stable-Baselines3.
