@@ -398,6 +398,9 @@ class Drone6DOFEnv(AdaptiveRLEnv[np.ndarray, np.ndarray]):
         action_penalty_weight: float = 0.01,
         angular_rate_penalty_weight: float = 0.05,
         tilt_penalty_weight: float = 0.1,
+        lidar_noise_std: float = 0.0,
+        lidar_dropout_prob: float = 0.0,
+        lidar_min_range: float = 0.0,
         terminate_on_collision: bool = True,
         render_mode: Optional[str] = None,
         split: Optional[str] = None,
@@ -412,6 +415,16 @@ class Drone6DOFEnv(AdaptiveRLEnv[np.ndarray, np.ndarray]):
             raise ValueError(f"target_radius must be positive, got {target_radius}")
         if collision_radius <= 0.0:
             raise ValueError(f"collision_radius must be positive, got {collision_radius}")
+        if lidar_noise_std < 0.0:
+            raise ValueError(f"lidar_noise_std cannot be negative, got {lidar_noise_std}")
+        if not (0.0 <= lidar_dropout_prob <= 1.0):
+            raise ValueError(
+                f"lidar_dropout_prob must be between 0.0 and 1.0, got {lidar_dropout_prob}"
+            )
+        if not (0.0 <= lidar_min_range < lidar_range):
+            raise ValueError(
+                f"lidar_min_range must be >= 0.0 and < lidar_range ({lidar_range}), got {lidar_min_range}"
+            )
 
         self.bounds = (float(bounds[0]), float(bounds[1]), float(bounds[2]))
         self.default_start = (
@@ -434,6 +447,9 @@ class Drone6DOFEnv(AdaptiveRLEnv[np.ndarray, np.ndarray]):
         self.collision_radius = float(collision_radius)
         self.lidar_range = float(lidar_range)
         self.num_lidar_rays = int(num_lidar_rays)
+        self.lidar_noise_std = float(lidar_noise_std)
+        self.lidar_dropout_prob = float(lidar_dropout_prob)
+        self.lidar_min_range = float(lidar_min_range)
         self.max_steps = int(max_steps)
         self.step_penalty = float(step_penalty)
         self.goal_reward = float(goal_reward)
@@ -536,6 +552,10 @@ class Drone6DOFEnv(AdaptiveRLEnv[np.ndarray, np.ndarray]):
             obstacles=self._obstacles,
             bounds=self.bounds,
             max_range=self.lidar_range,
+            noise_std=self.lidar_noise_std,
+            dropout_prob=self.lidar_dropout_prob,
+            min_range=self.lidar_min_range,
+            rng=self.np_random,
         )
 
         raw = np.concatenate(
@@ -586,6 +606,9 @@ class Drone6DOFEnv(AdaptiveRLEnv[np.ndarray, np.ndarray]):
             "num_obstacles": len(self._obstacles),
             "min_obstacle_distance": min_obs_dist if self._obstacles else float("inf"),
             "altitude": float(state.position[2]),
+            "lidar_noise_std": self.lidar_noise_std,
+            "lidar_dropout_prob": self.lidar_dropout_prob,
+            "lidar_min_range": self.lidar_min_range,
         }
         current_split = self._active_split if self._active_split is not None else self.split
         if current_split is not None:
@@ -654,6 +677,24 @@ class Drone6DOFEnv(AdaptiveRLEnv[np.ndarray, np.ndarray]):
         num_obs = self.num_obstacles
         if options and "num_obstacles" in options:
             num_obs = int(options["num_obstacles"])
+
+        if options and "lidar_noise_std" in options:
+            n_std = float(options["lidar_noise_std"])
+            if n_std < 0.0:
+                raise ValueError(f"lidar_noise_std cannot be negative, got {n_std}")
+            self.lidar_noise_std = n_std
+        if options and "lidar_dropout_prob" in options:
+            d_prob = float(options["lidar_dropout_prob"])
+            if not (0.0 <= d_prob <= 1.0):
+                raise ValueError(f"lidar_dropout_prob must be between 0.0 and 1.0, got {d_prob}")
+            self.lidar_dropout_prob = d_prob
+        if options and "lidar_min_range" in options:
+            m_range = float(options["lidar_min_range"])
+            if not (0.0 <= m_range < self.lidar_range):
+                raise ValueError(
+                    f"lidar_min_range must be >= 0.0 and < lidar_range ({self.lidar_range}), got {m_range}"
+                )
+            self.lidar_min_range = m_range
 
         self._position = self.default_start.copy()
         self._goal = self.default_goal.copy()
