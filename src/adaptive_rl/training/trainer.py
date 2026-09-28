@@ -140,6 +140,8 @@ class PPOTrainer:
             "collision_rate": self.metric_logger.collision_rate,
             "final_model_path": str(final_model_path),
             "duration_seconds": round(duration, 2),
+            "episode_rewards": [round(float(r), 2) for r in self.metric_logger.episode_rewards],
+            "episode_lengths": [int(length) for length in self.metric_logger.episode_lengths],
             "version": adaptive_rl.__version__,
         }
         with open(metadata_path, "w", encoding="utf-8") as f:

@@ -224,6 +224,11 @@ def evaluate(
     output_report: Optional[Path] = typer.Option(
         None, "--output-report", "-o", help="Optional path to export JSON metrics report"
     ),
+    compare_random: bool = typer.Option(
+        False,
+        "--compare-random",
+        help="Compare PPO against random action baseline under identical conditions",
+    ),
 ) -> None:
     """Evaluate a trained agent over multiple benchmark episodes."""
     if config is None:
@@ -313,6 +318,35 @@ def evaluate(
         )
         console.print(table)
 
+        if compare_random:
+            from adaptive_rl.evaluation.evaluator import compare_policies
+
+            comp_results = compare_policies(
+                ppo_algorithm=algo,
+                env=env,
+                num_episodes=num_episodes,
+                base_seed=exp_config.seed,
+            )
+            comp_table = Table(title=f"Policy Comparison ({num_episodes} episodes)")
+            comp_table.add_column("Policy", style="cyan")
+            comp_table.add_column("Success Rate", justify="right")
+            comp_table.add_column("Collision Rate", justify="right")
+            comp_table.add_column("Mean Reward", justify="right")
+            comp_table.add_column("Mean Steps", justify="right")
+
+            for pol_name, m in comp_results.items():
+                s_pct = f"{m.success_rate * 100:.1f}%" if m.success_rate is not None else "N/A"
+                c_pct = f"{m.collision_rate * 100:.1f}%" if m.collision_rate is not None else "N/A"
+                comp_table.add_row(
+                    pol_name,
+                    s_pct,
+                    c_pct,
+                    f"{m.mean_reward:.2f}",
+                    f"{m.mean_episode_length:.1f}",
+                )
+            console.print("\n")
+            console.print(comp_table)
+
         report_target = output_report or (exp_config.output_dir / "evaluation.json")
         saved_path = evaluator.save_report(metrics, report_target)
         console.print(f"\n[bold green]Report saved to:[/bold green] {saved_path}")
@@ -321,6 +355,80 @@ def evaluate(
     except Exception as err:
         console.print(f"[bold red]Evaluation failed with error:[/bold red] {err}")
         raise typer.Exit(code=1)
+
+
+@app.command(name="experiment-density")
+def experiment_density(
+    model: Path = typer.Option(..., "--model", "-m", help="Path to trained model weights (.zip)"),
+    episodes: int = typer.Option(
+        10, "--episodes", "-e", help="Episodes per obstacle density condition"
+    ),
+    seed: int = typer.Option(42, "--seed", "-s", help="Base random seed"),
+    output_report: Optional[Path] = typer.Option(
+        Path("artifacts/obstacle_density_experiment.json"),
+        "--output-report",
+        "-o",
+        help="Optional path to export JSON metrics report",
+    ),
+) -> None:
+    """Evaluate a trained agent across varied obstacle densities (4, 6, 8 obstacles)."""
+    if not model.exists():
+        console.print(f"[bold red]Model file does not exist:[/bold red] {model}")
+        raise typer.Exit(code=1)
+
+    console.print(
+        Panel.fit(
+            f"[bold cyan]Running Obstacle-Density Experiment[/bold cyan]\n\n"
+            f"• [bold]Model:[/bold] {model}\n"
+            f"• [bold]Obstacle Densities:[/bold] 4, 6, 8 obstacles\n"
+            f"• [bold]Episodes per Condition:[/bold] {episodes}\n"
+            f"• [bold]Seed:[/bold] {seed}\n\n"
+            f"[dim]Hypothesis: More obstacles increase navigation difficulty.[/dim]",
+            title="Obstacle-Density Experiment",
+            border_style="cyan",
+        )
+    )
+
+    from adaptive_rl.algorithms.ppo import PPOAlgorithm
+    from adaptive_rl.environments.drone import DroneNavigation3DEnv
+    from adaptive_rl.evaluation.evaluator import run_obstacle_density_experiment
+
+    dummy_env = DroneNavigation3DEnv()
+    try:
+        algo = PPOAlgorithm.from_pretrained(model, env=dummy_env)
+        results = run_obstacle_density_experiment(
+            algorithm=algo,
+            obstacle_counts=(4, 6, 8),
+            episodes_per_density=episodes,
+            base_seed=seed,
+            output_path=output_report,
+        )
+
+        table = Table(title="Obstacle-Density Results")
+        table.add_column("Obstacles", style="cyan")
+        table.add_column("Success Rate", justify="right")
+        table.add_column("Collision Rate", justify="right")
+        table.add_column("Mean Reward", justify="right")
+        table.add_column("Mean Steps", justify="right")
+
+        for r in results:
+            table.add_row(
+                f"{r['obstacle_count']} Obstacles",
+                f"{r['success_rate'] * 100:.1f}%",
+                f"{r['collision_rate'] * 100:.1f}%",
+                f"{r['mean_reward']:.2f}",
+                f"{r['mean_episode_length']:.1f}",
+            )
+
+        console.print("\n")
+        console.print(table)
+        if output_report:
+            console.print(f"\n[bold green]Report saved to:[/bold green] {output_report}")
+    except Exception as err:
+        console.print(f"[bold red]Experiment failed with error:[/bold red] {err}")
+        raise typer.Exit(code=1)
+    finally:
+        dummy_env.close()
 
 
 @app.command(name="demo-drone")
