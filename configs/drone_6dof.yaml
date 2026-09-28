@@ -1,0 +1,41 @@
+name: "drone_6dof"
+seed: 42
+
+algorithm:
+  name: "ppo"
+  learning_rate: 0.0003
+  gamma: 0.99
+  batch_size: 64
+  parameters:
+    n_steps: 1024
+    n_epochs: 10
+    clip_range: 0.2
+    ent_coef: 0.01
+
+environment:
+  name: "drone-6dof"
+  max_steps: 400
+  parameters:
+    bounds: [30.0, 30.0, 15.0]
+    start_pos: [5.0, 5.0, 5.0]
+    goal_pos: [25.0, 25.0, 10.0]
+    num_obstacles: 4
+    obstacle_radius: 2.0
+    target_radius: 1.5
+    collision_radius: 0.8
+    progress_weight: 2.0
+    action_penalty_weight: 0.01
+    angular_rate_penalty_weight: 0.05
+    tilt_penalty_weight: 0.1
+
+training:
+  total_timesteps: 50000
+  checkpoint_freq: 10000
+  log_interval: 10
+
+evaluation:
+  eval_episodes: 20
+  deterministic: true
+
+output_dir: "artifacts"
+log_dir: "artifacts/logs"
