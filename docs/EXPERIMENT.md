@@ -332,3 +332,59 @@ adaptive-rl experiment-ablation --timesteps 500 --episodes 5 --seed 42
 Outputs are automatically exported to:
 - `artifacts/benchmarks/reward_ablation.json` (detailed per-variant results and configuration metadata)
 - `artifacts/benchmarks/reward_ablation.csv` (tabular benchmark data for analysis)
+
+---
+
+## 6. Experiment Manifest and Provenance Auditing
+
+Every training and benchmark run automatically persists a comprehensive experiment manifest to `artifacts/metadata/{name}_manifest.json` (Issue #248). The manifest ensures scientific reproducibility and verifiable artifact provenance without requiring external cloud trackers.
+
+### Manifest Schema & Contents
+
+The manifest document captures:
+1. **Git Provenance**:
+   - `git_commit`: Full 40-character SHA-1 commit hash (or `"unknown"` if executed outside a Git repository).
+   - `git_branch`: Active Git branch name.
+   - `git_dirty`: Boolean flag indicating whether uncommitted source modifications were present at execution time.
+2. **Host System & Python Runtime**:
+   - `os_name`, `os_version`: Operating system platform and kernel release.
+   - `python_version`: Precise Python interpreter version.
+   - `architecture`: Hardware architecture (e.g. `x86_64`, `aarch64`).
+3. **Software Package Pinned Versions**:
+   - Explicit pinned versions of core dependencies: `adaptive_rl`, `torch`, `stable_baselines3`, `gymnasium`, `numpy`, `typer`, and `pydantic`.
+4. **Hardware & Compute Telemetry**:
+   - `device`: Primary compute device used (`cpu` or `cuda`).
+   - `gpu_name`, `gpu_count`: Dedicated accelerator specifications if GPU is available.
+   - `cpu_count`: Available logical CPU cores.
+5. **Execution Timing & Invocation**:
+   - `started_at`, `finished_at`: Exact ISO 8601 UTC timestamps.
+   - `duration_seconds`: Total wall-clock duration of the experiment.
+   - `training_time_seconds`: Monotonic duration of interaction/training (excluding model serialization).
+   - `command`: Sanitized command line arguments (`sys.argv`).
+6. **Artifact Checksums & Provenance**:
+   - Full filesystem paths, file sizes, and **SHA-256 cryptographic digests** for all generated model weight files (`.zip`) and metric reports (`.json`).
+7. **Security & Sanitization**:
+   - The manifest generator strictly avoids recording environment credentials, API tokens, passwords, or unrelated private files.
+
+### Inspecting a Manifest via CLI
+
+Inspect and verify an experiment manifest using the CLI:
+
+```bash
+# Using 'inspect manifest'
+adaptive-rl inspect manifest artifacts/metadata/drone_ppo_manifest.json
+
+# Using 'manifest inspect'
+adaptive-rl manifest inspect artifacts/metadata/drone_ppo_manifest.json
+```
+
+The CLI renders a formatted terminal table detailing all categories and verifies whether linked artifact files exist and match their recorded SHA-256 checksums (`✓ Verified`).
+
+### Reproducing an Experiment from a Manifest
+
+To audit or reproduce a historical experiment:
+1. **Verify Source State**: Checkout the exact Git commit recorded in `git.git_commit`. If `git_dirty` is `true`, note that working-tree modifications were present.
+2. **Verify Environment**: Compare Python and package versions against `packages`.
+3. **Replay Configuration**: Instantiate the experiment using the identical `config` payload and `config.seed`.
+4. **Verify Generated Weights**: Calculate SHA-256 of the resulting model weights and compare against the manifest's `artifacts.model.sha256`.
+

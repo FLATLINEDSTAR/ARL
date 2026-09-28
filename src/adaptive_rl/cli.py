@@ -28,7 +28,7 @@ app = typer.Typer(
 
 benchmark_app = typer.Typer(
     name="benchmark",
-    help="PPO learning-curve benchmark commands (PPO only).",
+    help="Benchmarking and comparative evaluation commands.",
     no_args_is_help=True,
 )
 app.add_typer(benchmark_app, name="benchmark")
@@ -47,12 +47,19 @@ env_app = typer.Typer(
 )
 app.add_typer(env_app, name="env")
 
-benchmark_app = typer.Typer(
-    name="benchmark",
-    help="Benchmarking and comparative evaluation commands.",
+inspect_app = typer.Typer(
+    name="inspect",
+    help="Inspection commands for experiment manifests, environments, and configurations.",
     no_args_is_help=True,
 )
-app.add_typer(benchmark_app, name="benchmark")
+app.add_typer(inspect_app, name="inspect")
+
+manifest_app = typer.Typer(
+    name="manifest",
+    help="Experiment manifest inspection and verification commands.",
+    no_args_is_help=True,
+)
+app.add_typer(manifest_app, name="manifest")
 
 console = Console()
 
@@ -147,6 +154,134 @@ def inspect_env(
             )
         )
         raise typer.Exit(code=1)
+
+
+def _render_manifest(path: Path) -> None:
+    """Load, validate, and render an experiment manifest with artifact verification."""
+    try:
+        from adaptive_rl.manifest import compute_sha256, load_manifest
+
+        manifest = load_manifest(path)
+
+        table = Table(
+            title=f"Experiment Manifest: {manifest.experiment_name}",
+            border_style="cyan",
+        )
+        table.add_column("Category", style="bold cyan", width=18)
+        table.add_column("Property", style="bold white", width=22)
+        table.add_column("Value", style="green")
+
+        # Git
+        table.add_row("Git Metadata", "Commit", manifest.git.git_commit)
+        table.add_row("Git Metadata", "Branch", manifest.git.git_branch)
+        table.add_row(
+            "Git Metadata",
+            "Dirty State",
+            "[red]Dirty (uncommitted changes)[/red]"
+            if manifest.git.git_dirty
+            else "[green]Clean[/green]",
+        )
+
+        # Host
+        table.add_row("Host System", "OS", f"{manifest.host.os_name} {manifest.host.os_version}")
+        table.add_row("Host System", "Python", manifest.host.python_version)
+        table.add_row("Host System", "Architecture", manifest.host.architecture)
+
+        # Hardware
+        table.add_row("Hardware", "Device", manifest.hardware.device.upper())
+        table.add_row("Hardware", "CPU Cores", str(manifest.hardware.cpu_count))
+        if manifest.hardware.gpu_name:
+            table.add_row("Hardware", "GPU Model", manifest.hardware.gpu_name)
+            table.add_row("Hardware", "GPU Count", str(manifest.hardware.gpu_count))
+
+        # Packages
+        pkgs = manifest.packages
+        pkg_summary = (
+            f"adaptive-rl: {pkgs.adaptive_rl} | torch: {pkgs.torch} | "
+            f"sb3: {pkgs.stable_baselines3} | gym: {pkgs.gymnasium} | numpy: {pkgs.numpy}"
+        )
+        table.add_row("Packages", "Pinned Libraries", pkg_summary)
+
+        # Execution
+        exec_info = manifest.execution
+        table.add_row("Execution", "Started (UTC)", exec_info.started_at)
+        table.add_row("Execution", "Finished (UTC)", exec_info.finished_at)
+        table.add_row("Execution", "Wall Duration", f"{exec_info.duration_seconds:.2f} s")
+        if exec_info.training_time_seconds is not None:
+            table.add_row(
+                "Execution", "Training Duration", f"{exec_info.training_time_seconds:.2f} s"
+            )
+        if exec_info.command:
+            table.add_row("Execution", "Command", " ".join(exec_info.command))
+
+        # Config overview
+        cfg = manifest.config
+        algo_name = (
+            cfg.get("algorithm", {}).get("name", "N/A")
+            if isinstance(cfg.get("algorithm"), dict)
+            else "N/A"
+        )
+        env_name = (
+            cfg.get("environment", {}).get("name", "N/A")
+            if isinstance(cfg.get("environment"), dict)
+            else "N/A"
+        )
+        seed_val = str(cfg.get("seed", "N/A"))
+        table.add_row("Configuration", "Algorithm / Env", f"{algo_name} / {env_name}")
+        table.add_row("Configuration", "Random Seed", seed_val)
+
+        # Artifacts
+        if manifest.artifacts:
+            for art_name, art_info in manifest.artifacts.items():
+                p = Path(art_info.path)
+                verified = False
+                if p.is_file():
+                    try:
+                        actual_hash = compute_sha256(p)
+                        verified = actual_hash == art_info.sha256
+                    except Exception:
+                        verified = False
+                status = (
+                    "[bold green]✓ Verified[/bold green]"
+                    if verified
+                    else (
+                        "[bold yellow]File missing[/bold yellow]"
+                        if not p.exists()
+                        else "[bold red]Checksum mismatch[/bold red]"
+                    )
+                )
+                table.add_row(
+                    f"Artifact ({art_name})",
+                    p.name,
+                    f"SHA-256: {art_info.sha256[:16]}... [{status}] ({art_info.size_bytes:,} bytes)",
+                )
+
+        console.print(table)
+    except Exception as err:
+        console.print(
+            Panel.fit(
+                f"[bold red]Failed to inspect manifest:[/bold red]\n\n{err}",
+                title=f"Manifest Error: {path.name}",
+                border_style="red",
+            )
+        )
+        raise typer.Exit(code=1)
+
+
+@inspect_app.command(name="manifest")
+def inspect_manifest_sub(
+    path: Path = typer.Argument(..., help="Path to experiment manifest JSON file"),
+) -> None:
+    """Inspect and verify an experiment metadata manifest."""
+    _render_manifest(path)
+
+
+@manifest_app.command(name="inspect")
+def inspect_manifest_cmd(
+    path: Path = typer.Argument(..., help="Path to experiment manifest JSON file"),
+) -> None:
+    """Inspect and verify an experiment metadata manifest."""
+    _render_manifest(path)
 
 
 @app.command()

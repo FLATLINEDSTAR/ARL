@@ -55,6 +55,7 @@ class TrainingResult:
     success_rate: Optional[float] = None
     collision_rate: Optional[float] = None
     metadata_path: Optional[Path] = None
+    manifest_path: Optional[Path] = None
     training_time_seconds: float = 0.0
 
 
@@ -192,6 +193,23 @@ class RLTrainer:
         with open(metadata_path, "w", encoding="utf-8") as f:
             json.dump(meta_dict, f, indent=2)
 
+        # Generate and save experiment manifest (Issue #248)
+        from adaptive_rl.manifest import create_manifest, save_manifest
+
+        manifest = create_manifest(
+            experiment_name=self.config.name,
+            config_dict=self.config.model_dump(),
+            started_at=started_at,
+            finished_at=finished_at,
+            training_time_seconds=training_time_seconds,
+            artifacts={
+                "model": final_model_path,
+                "metadata": metadata_path,
+            },
+        )
+        manifest_path = metadata_dir / f"{self.config.name}_manifest.json"
+        save_manifest(manifest, manifest_path)
+
         return TrainingResult(
             experiment_name=self.config.name,
             total_timesteps=self.config.training.total_timesteps,
@@ -204,6 +222,7 @@ class RLTrainer:
             success_rate=self.metric_logger.success_rate,
             collision_rate=self.metric_logger.collision_rate,
             metadata_path=metadata_path,
+            manifest_path=manifest_path,
             training_time_seconds=training_time_seconds,
         )
 
