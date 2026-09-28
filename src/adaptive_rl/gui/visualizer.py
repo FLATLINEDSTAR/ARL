@@ -406,3 +406,153 @@ def run_drone_simulation_episode(
         "start_pos": env.default_start.copy(),
         "lidar_rays": env.lidar_rays,
     }
+
+
+def build_training_curve_figure(
+    episode_rewards: Sequence[float],
+    window_size: int = 10,
+    title: str = "PPO Training Progress",
+) -> go.Figure:
+    """Construct an interactive Plotly training curve with rolling average."""
+    fig = go.Figure()
+    if not episode_rewards:
+        fig.update_layout(
+            template="plotly_dark",
+            title=title,
+            annotations=[
+                dict(
+                    text="No training episodes recorded yet.",
+                    xref="paper",
+                    yref="paper",
+                    showarrow=False,
+                    font=dict(size=14, color="gray"),
+                )
+            ],
+        )
+        return fig
+
+    episodes = list(range(1, len(episode_rewards) + 1))
+    fig.add_trace(
+        go.Scatter(
+            x=episodes,
+            y=list(episode_rewards),
+            mode="lines",
+            line=dict(color="rgba(100, 180, 255, 0.4)", width=1.5),
+            name="Episode Return",
+        )
+    )
+
+    if len(episode_rewards) >= window_size:
+        rolling = np.convolve(
+            np.asarray(episode_rewards, dtype=float),
+            np.ones(window_size) / window_size,
+            mode="valid",
+        )
+        rolling_x = list(range(window_size, len(episode_rewards) + 1))
+        fig.add_trace(
+            go.Scatter(
+                x=rolling_x,
+                y=rolling.tolist(),
+                mode="lines",
+                line=dict(color="#00E5FF", width=3),
+                name=f"Moving Avg (w={window_size})",
+            )
+        )
+
+    fig.update_layout(
+        template="plotly_dark",
+        title=title,
+        xaxis_title="Episode",
+        yaxis_title="Return (Cumulative Reward)",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        margin=dict(l=20, r=20, t=50, b=20),
+    )
+    return fig
+
+
+def build_comparison_bar_chart(
+    metrics_map: Dict[str, Any],
+    title: str = "Policy Performance Comparison",
+) -> go.Figure:
+    """Build side-by-side bar chart comparing PPO vs Random Policy."""
+    fig = go.Figure()
+    policies = list(metrics_map.keys())
+    if not policies:
+        return fig
+
+    categories = ["Success Rate (%)", "Collision Rate (%)"]
+    colors = ["#00E676", "#FF5252", "#FFD700", "#7C4DFF"]
+
+    for i, policy_name in enumerate(policies):
+        m = metrics_map[policy_name]
+        succ = (m.success_rate if hasattr(m, "success_rate") else m.get("success_rate", 0.0)) or 0.0
+        coll = (
+            m.collision_rate if hasattr(m, "collision_rate") else m.get("collision_rate", 0.0)
+        ) or 0.0
+
+        fig.add_trace(
+            go.Bar(
+                name=policy_name,
+                x=categories,
+                y=[succ * 100.0, coll * 100.0],
+                marker_color=colors[i % len(colors)],
+                text=[f"{succ * 100:.1f}%", f"{coll * 100:.1f}%"],
+                textposition="auto",
+            )
+        )
+
+    fig.update_layout(
+        template="plotly_dark",
+        barmode="group",
+        title=title,
+        yaxis=dict(title="Percentage (%)", range=[0, 105]),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        margin=dict(l=20, r=20, t=50, b=20),
+    )
+    return fig
+
+
+def build_density_experiment_figure(
+    density_results: List[Dict[str, Any]],
+    title: str = "Obstacle Density vs Navigation Performance",
+) -> go.Figure:
+    """Build performance visualization for the obstacle-density experiment."""
+    fig = go.Figure()
+    if not density_results:
+        return fig
+
+    x_labels = [f"{d['obstacle_count']} Obstacles" for d in density_results]
+    success_rates = [(d.get("success_rate", 0.0) or 0.0) * 100.0 for d in density_results]
+    collision_rates = [(d.get("collision_rate", 0.0) or 0.0) * 100.0 for d in density_results]
+
+    fig.add_trace(
+        go.Bar(
+            name="Success Rate (%)",
+            x=x_labels,
+            y=success_rates,
+            marker_color="#00E676",
+            text=[f"{s:.1f}%" for s in success_rates],
+            textposition="auto",
+        )
+    )
+
+    fig.add_trace(
+        go.Bar(
+            name="Collision Rate (%)",
+            x=x_labels,
+            y=collision_rates,
+            marker_color="#FF5252",
+            text=[f"{c:.1f}%" for c in collision_rates],
+            textposition="auto",
+        )
+    )
+
+    fig.update_layout(
+        template="plotly_dark",
+        barmode="group",
+        title=title,
+        yaxis=dict(title="Rate (%)", range=[0, 105]),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        margin=dict(l=20, r=20, t=50, b=20),
+    )
+    return fig
