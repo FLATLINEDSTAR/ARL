@@ -15,7 +15,10 @@ from adaptive_rl.benchmarking.adaptation_artifacts import (
     write_study_manifest,
 )
 from adaptive_rl.benchmarking.adaptation_runner import (
+    ReplicateResult,
     _load_resume_replicates,
+    _persist_replicate_checkpoint,
+    _preflight_incomplete_study_directory,
     _read_completed_study_artifact,
     _resume_replicate_checkpoint,
     run_adaptation_benchmark,
@@ -187,6 +190,69 @@ def test_resume_preflight_rejects_orphan_checkpoint_digest_before_training(
             study_hash="study",
             protocol_hash="protocol",
             training_seeds=(TRAINING_SEEDS[0], TRAINING_SEEDS[1]),
+        )
+
+
+def test_resume_preflight_rejects_unrecognized_run_and_training_entries(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "run"
+    run_root.mkdir()
+    (run_root / "study_manifest.json").write_text("{}\n", encoding="utf-8")
+    (run_root / "unexpected.tmp").write_text("partial\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="unexpected entry: unexpected.tmp"):
+        _preflight_incomplete_study_directory(
+            run_root,
+            training_seeds=TRAINING_SEEDS,
+        )
+
+    (run_root / "unexpected.tmp").unlink()
+    unknown_training = run_root / "training" / "seed_99999"
+    unknown_training.mkdir(parents=True)
+    with pytest.raises(ValueError, match="training state contains an unexpected entry"):
+        _preflight_incomplete_study_directory(
+            run_root,
+            training_seeds=TRAINING_SEEDS,
+        )
+
+
+def test_interrupted_replicate_failure_is_checkpointed_with_partial_training_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    run_root = Path("run")
+    training_dir = run_root / "training" / f"seed_{TRAINING_SEEDS[0]}"
+    training_dir.mkdir(parents=True)
+    (training_dir / "partial.log").write_text("interrupted\n", encoding="utf-8")
+    replicate = ReplicateResult(
+        training_seed=TRAINING_SEEDS[0],
+        status="failed",
+        failure_reason="interrupted replicate has no complete hashed checkpoint",
+    )
+
+    _persist_replicate_checkpoint(
+        replicate,
+        state_root=run_root / "replicate_state",
+        target_dir=run_root,
+        training_dir=training_dir,
+        study_hash="study",
+        protocol_hash="protocol",
+    )
+    restored = _resume_replicate_checkpoint(
+        run_root / "replicate_state" / f"seed_{TRAINING_SEEDS[0]}.json",
+        study_hash="study",
+        protocol_hash="protocol",
+        training_seed=TRAINING_SEEDS[0],
+    )
+    assert restored.status == "failed"
+    assert restored.failure_reason == replicate.failure_reason
+    (training_dir / "partial.log").write_text("changed after checkpoint\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="artifact checksum mismatch"):
+        _resume_replicate_checkpoint(
+            run_root / "replicate_state" / f"seed_{TRAINING_SEEDS[0]}.json",
+            study_hash="study",
+            protocol_hash="protocol",
+            training_seed=TRAINING_SEEDS[0],
         )
 
 

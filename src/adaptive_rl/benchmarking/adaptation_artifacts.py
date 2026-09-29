@@ -74,7 +74,15 @@ def _plain(value: Any) -> Any:
     if isinstance(value, Mapping):
         if not all(isinstance(key, (str, int, float, bool)) for key in value):
             raise TypeError("artifact mappings must have primitive keys")
-        return {str(key): _plain(nested) for key, nested in value.items()}
+        normalized: dict[str, Any] = {}
+        for key, nested in value.items():
+            if isinstance(key, float) and not np.isfinite(key):
+                raise ValueError("artifact mapping keys must be finite")
+            normalized_key = str(key)
+            if normalized_key in normalized:
+                raise ValueError("artifact mapping keys collide after JSON normalization")
+            normalized[normalized_key] = _plain(nested)
+        return normalized
     if isinstance(value, (list, tuple)):
         return [_plain(nested) for nested in value]
     if isinstance(value, str) and value.startswith("/"):
@@ -289,6 +297,8 @@ def write_or_verify_study_manifest(
 ) -> str:
     """Persist the expected study identity or fail closed when resuming."""
     manifest_path = Path(manifest_path)
+    if resume and (manifest_path.is_symlink() or not manifest_path.is_file()):
+        raise ValueError("cannot resume without a valid immutable study manifest")
     expected = make_study_manifest(inputs)
     if resume:
         try:

@@ -36,9 +36,12 @@ seeds continue. A present but malformed, stale, or mismatched checkpoint aborts
 resume rather than becoming a failed replicate. Final manifest validation also
 rejects files added to the completed run directory after its artifact set was
 recorded. Replicate checkpoints bind the training files they rely on, and the
-runner validates all checkpoint state before resuming any unfinished seed.
-Repeating resume after finalization validates and returns the same
-immutable result. The JSON stores
+runner validates all checkpoint state before resuming any unfinished seed. An
+interrupted seed's failed terminal record is checkpointed and binds the partial
+training file set; paired analysis and final raw replicate records are rebuilt
+from the validated terminal checkpoints. Before training resumes, unknown run
+entries and unknown per-seed training directories are rejected. Repeating resume after finalization
+validates and returns the same immutable result. The JSON stores
 the raw trajectories, protocol analysis, seed schedule, outcomes, runtime
 invariants, and run status.
 The runner returns that same persisted JSON on initial completion and repeated

@@ -363,6 +363,11 @@ def test_canonical_study_hash_ignores_mapping_order_and_json_formatting(tmp_path
     assert write_or_verify_study_manifest(right, path, resume=True) == digest
 
 
+def test_canonical_study_hash_rejects_json_key_collisions() -> None:
+    with pytest.raises(ValueError, match="keys collide after JSON normalization"):
+        make_study_manifest({1: "numeric key", "1": "string key"})
+
+
 def test_study_hash_binds_artifact_schema_versions() -> None:
     base = {
         "protocol": "prereg-v1",
@@ -397,6 +402,15 @@ def test_resume_rejects_missing_or_malformed_study_manifest(tmp_path) -> None:
     path.write_text("{broken", encoding="utf-8")
     with pytest.raises(ValueError, match="valid immutable study manifest"):
         write_or_verify_study_manifest({"a": 1}, path, resume=True)
+
+
+def test_resume_rejects_symlinked_study_manifest(tmp_path) -> None:
+    actual = tmp_path / "actual.json"
+    write_or_verify_study_manifest({"a": 1}, actual, resume=False)
+    linked = tmp_path / "study_manifest.json"
+    linked.symlink_to(actual)
+    with pytest.raises(ValueError, match="valid immutable study manifest"):
+        write_or_verify_study_manifest({"a": 1}, linked, resume=True)
 
 
 def test_issue271_preregistered_inputs_match_frozen_hashes() -> None:

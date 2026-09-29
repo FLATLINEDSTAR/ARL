@@ -462,6 +462,52 @@ def _load_resume_replicates(
     return restored
 
 
+def _preflight_incomplete_study_directory(
+    target_dir: Path,
+    *,
+    training_seeds: Sequence[int],
+) -> None:
+    """Reject unrecognized run content before an incomplete study can resume."""
+    if target_dir.is_symlink() or not target_dir.is_dir():
+        raise ValueError("resume study path is not a regular directory")
+    allowed_names = {"study_manifest.json", "training", "replicate_state"}
+    for path in target_dir.iterdir():
+        if path.name not in allowed_names:
+            raise ValueError(f"incomplete study contains an unexpected entry: {path.name}")
+        if path.name != "study_manifest.json" and (path.is_symlink() or not path.is_dir()):
+            raise ValueError(f"incomplete study path is not a regular directory: {path.name}")
+
+    training_root = target_dir / "training"
+    if training_root.exists():
+        expected_training_dirs = {f"seed_{seed}" for seed in training_seeds}
+        for path in training_root.iterdir():
+            if (
+                path.name not in expected_training_dirs
+                or path.is_symlink()
+                or not path.is_dir()
+            ):
+                raise ValueError(f"training state contains an unexpected entry: {path.name}")
+
+
+def _persist_replicate_checkpoint(
+    replicate: ReplicateResult,
+    *,
+    state_root: Path,
+    target_dir: Path,
+    training_dir: Path,
+    study_hash: str,
+    protocol_hash: str,
+) -> None:
+    write_replicate_checkpoint(
+        replicate.to_dict(),
+        state_root / f"seed_{replicate.training_seed}.json",
+        study_hash=study_hash,
+        protocol_hash=protocol_hash,
+        artifact_root=target_dir,
+        artifact_directories=(training_dir.resolve(),),
+    )
+
+
 def _read_completed_study_artifact(
     artifact_path: Path,
     manifest_path: Path,
@@ -777,6 +823,13 @@ def run_adaptation_benchmark(
     target_dir = Path(output_dir) if output_dir is not None else Path(config.output_dir)
     if study_run_id is not None:
         target_dir = target_dir / study_run_id
+        if target_dir.is_symlink():
+            raise ValueError("prereg-v1 run directory cannot be a symlink")
+        if resume and not target_dir.is_dir():
+            raise ValueError("cannot resume a study without its existing run directory")
+        if not resume and target_dir.exists():
+            if not target_dir.is_dir() or any(target_dir.iterdir()):
+                raise FileExistsError("prereg-v1 run directory already contains files")
     target_dir.mkdir(parents=True, exist_ok=True)
     stem = "adaptive_vs_fixed" if study_run_id is not None else "adaptation"
     suffixes = (f"{stem}.json", f"{stem}.csv")
@@ -830,6 +883,11 @@ def run_adaptation_benchmark(
                 raise FileExistsError(
                     f"refusing to overwrite existing artifact or partial completion: {path}"
                 )
+        if resume:
+            _preflight_incomplete_study_directory(
+                target_dir,
+                training_seeds=selected_seeds,
+            )
     else:
         for suffix in (*suffixes, "manifest.json"):
             if (target_dir / suffix).exists():
@@ -859,15 +917,23 @@ def run_adaptation_benchmark(
             results.append(resumed_replicates[seed])
             continue
         if study_run_id is not None and resume and training_dir.exists():
-            results.append(
-                ReplicateResult(
-                    training_seed=seed,
-                    status="failed",
-                    failure_reason=(
-                        "interrupted replicate has no complete hashed checkpoint; "
-                        "partial training state was not trusted"
-                    ),
-                )
+            interrupted = ReplicateResult(
+                training_seed=seed,
+                status="failed",
+                failure_reason=(
+                    "interrupted replicate has no complete hashed checkpoint; "
+                    "partial training state was not trusted"
+                ),
+            )
+            results.append(interrupted)
+            assert study_hash is not None and protocol_hash is not None
+            _persist_replicate_checkpoint(
+                interrupted,
+                state_root=state_root,
+                target_dir=target_dir,
+                training_dir=training_dir,
+                study_hash=study_hash,
+                protocol_hash=protocol_hash,
             )
             continue
         replicate = _run_replicate(
@@ -882,14 +948,26 @@ def run_adaptation_benchmark(
         results.append(replicate)
         if study_run_id is not None:
             assert study_hash is not None and protocol_hash is not None
-            write_replicate_checkpoint(
-                replicate.to_dict(),
-                state_root / f"seed_{seed}.json",
+            _persist_replicate_checkpoint(
+                replicate,
+                state_root=state_root,
+                target_dir=target_dir,
+                training_dir=training_dir,
                 study_hash=study_hash,
                 protocol_hash=protocol_hash,
-                artifact_root=target_dir,
-                artifact_directories=(training_dir,),
             )
+
+    if study_run_id is not None:
+        assert study_hash is not None and protocol_hash is not None
+        persisted_replicates = _load_resume_replicates(
+            state_root,
+            study_hash=study_hash,
+            protocol_hash=protocol_hash,
+            training_seeds=selected_seeds,
+        )
+        if set(persisted_replicates) != set(selected_seeds):
+            raise RuntimeError("completed study lacks a hashed terminal checkpoint for a seed")
+        results = [persisted_replicates[seed] for seed in selected_seeds]
 
     vectors: dict[str, tuple[list[Optional[float]], list[Optional[float]]]] = {}
     for cell in PRIMARY_CELLS:

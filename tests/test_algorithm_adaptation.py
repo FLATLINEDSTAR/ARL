@@ -162,43 +162,43 @@ def test_ppo_buffer_gae_matches_hand_calculation_for_terminal_and_truncation() -
         transitions = (
             Transition(
                 observation=np.zeros(3, dtype=np.float32),
-                action=np.zeros(1, dtype=np.float32),
+                action=np.asarray([0.1], dtype=np.float32),
                 reward=1.0,
                 next_observation=np.ones(3, dtype=np.float32),
                 terminated=False,
                 truncated=False,
-                behavior_log_prob=0.0,
+                behavior_log_prob=-0.1,
                 behavior_value=values[0],
             ),
             Transition(
                 observation=np.ones(3, dtype=np.float32),
-                action=np.zeros(1, dtype=np.float32),
+                action=np.asarray([0.2], dtype=np.float32),
                 reward=2.0,
                 next_observation=np.full(3, 2.0, dtype=np.float32),
                 terminated=False,
                 truncated=True,
-                behavior_log_prob=0.0,
+                behavior_log_prob=-0.2,
                 behavior_value=values[1],
                 behavior_next_value=0.5,
             ),
             Transition(
                 observation=np.full(3, 3.0, dtype=np.float32),
-                action=np.zeros(1, dtype=np.float32),
+                action=np.asarray([0.3], dtype=np.float32),
                 reward=3.0,
                 next_observation=np.full(3, 4.0, dtype=np.float32),
                 terminated=False,
                 truncated=False,
-                behavior_log_prob=0.0,
+                behavior_log_prob=-0.3,
                 behavior_value=values[2],
             ),
             Transition(
                 observation=np.full(3, 4.0, dtype=np.float32),
-                action=np.zeros(1, dtype=np.float32),
+                action=np.asarray([0.4], dtype=np.float32),
                 reward=4.0,
                 next_observation=np.full(3, 5.0, dtype=np.float32),
                 terminated=True,
                 truncated=False,
-                behavior_log_prob=0.0,
+                behavior_log_prob=-0.4,
                 behavior_value=values[3],
             ),
         )
@@ -233,8 +233,16 @@ def test_ppo_buffer_gae_matches_hand_calculation_for_terminal_and_truncation() -
         original_train = model.train
 
         def capture_buffer() -> None:
-            captured["advantages"] = model.rollout_buffer.advantages.copy().reshape(-1)
-            captured["returns"] = model.rollout_buffer.returns.copy().reshape(-1)
+            buffer = model.rollout_buffer
+            assert buffer.buffer_size == len(transitions)
+            assert buffer.pos == 0
+            assert buffer.full is True
+            captured["advantages"] = buffer.advantages.copy().reshape(-1)
+            captured["returns"] = buffer.returns.copy().reshape(-1)
+            captured["actions"] = buffer.actions.copy().reshape(-1)
+            captured["episode_starts"] = buffer.episode_starts.copy().reshape(-1)
+            captured["values"] = buffer.values.copy().reshape(-1)
+            captured["log_probs"] = buffer.log_probs.copy().reshape(-1)
             model.logger.record("train/loss", 1.0)
 
         model.train = capture_buffer
@@ -246,6 +254,10 @@ def test_ppo_buffer_gae_matches_hand_calculation_for_terminal_and_truncation() -
         np.testing.assert_allclose(
             captured["returns"], expected_advantages + np.asarray(values), rtol=1e-6
         )
+        np.testing.assert_allclose(captured["actions"], [0.1, 0.2, 0.3, 0.4])
+        np.testing.assert_array_equal(captured["episode_starts"], [1.0, 0.0, 1.0, 0.0])
+        np.testing.assert_allclose(captured["values"], values)
+        np.testing.assert_allclose(captured["log_probs"], [-0.1, -0.2, -0.3, -0.4])
     finally:
         env.close()
 
