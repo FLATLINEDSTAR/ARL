@@ -264,12 +264,15 @@ def test_replicate_checkpoint_is_terminal_hashed_and_tamper_evident(tmp_path) ->
         study_hash=study_hash,
         protocol_hash=protocol_hash,
     )
-    assert read_replicate_checkpoint(
-        checkpoint,
-        study_hash=study_hash,
-        protocol_hash=protocol_hash,
-        training_seed=31001,
-    )["failure_reason"] == "crash"
+    assert (
+        read_replicate_checkpoint(
+            checkpoint,
+            study_hash=study_hash,
+            protocol_hash=protocol_hash,
+            training_seed=31001,
+        )["failure_reason"]
+        == "crash"
+    )
     original = checkpoint.read_bytes()
     with pytest.raises(FileExistsError):
         write_replicate_checkpoint(

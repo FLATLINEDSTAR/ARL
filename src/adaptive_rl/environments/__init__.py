@@ -59,9 +59,11 @@ def register_default_environments() -> None:
         )
 
     if "drone_disturbed" not in list_environments():
+        from adaptive_rl.environments.disturbed_drone import DroneDisturbed3DEnv
+
         register(
             "drone_disturbed",
-            lambda **kwargs: DroneNavigation3DEnv(**kwargs),
+            lambda **kwargs: DroneDisturbed3DEnv(**kwargs),
             metadata=EnvironmentMetadata(
                 name="drone_disturbed",
                 description="Drone navigation with deterministic steady-wind and OU gust parameters.",
@@ -71,6 +73,9 @@ def register_default_environments() -> None:
                 max_episode_steps=200,
                 reward_range=(-100.0, 100.0),
                 tags=["continuous", "drone", "distribution-shift", "wind", "gust"],
+            ),
+        )
+
     if "drone-6dof" not in list_environments():
         from adaptive_rl.environments.drone_6dof import Drone6DOFEnv
 

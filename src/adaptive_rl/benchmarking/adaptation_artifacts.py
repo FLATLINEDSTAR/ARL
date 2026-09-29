@@ -471,7 +471,10 @@ def validate_study_manifest(manifest_path: str | Path) -> None:
         if not isinstance(spec, dict) or not isinstance(spec.get("inputs"), dict):
             raise ValueError("pre-execution study manifest is malformed")
         actual_study_hash = hashlib.sha256(canonical_json_bytes(spec["inputs"])).hexdigest()
-        if spec.get("study_hash") != actual_study_hash or manifest.get("study_hash") != actual_study_hash:
+        if (
+            spec.get("study_hash") != actual_study_hash
+            or manifest.get("study_hash") != actual_study_hash
+        ):
             raise ValueError("study artifact manifest hash does not match its pre-execution spec")
 
 
@@ -573,7 +576,10 @@ def read_replicate_checkpoint(
         checkpoint_path.parent.parent,
         envelope.get("artifact_integrity"),
     )
-    if envelope.get("replicate_id") != training_seed or replicate.get("training_seed") != training_seed:
+    if (
+        envelope.get("replicate_id") != training_seed
+        or replicate.get("training_seed") != training_seed
+    ):
         raise ValueError("replicate checkpoint identity mismatch")
     result = replicate
     if result.get("status") not in {"completed", "failed"}:
@@ -613,9 +619,7 @@ def _snapshot_artifact_directories(
                 if path.is_file():
                     relative_path = path.resolve().relative_to(root).as_posix()
                     files[relative_path] = sha256_file(path)
-        snapshots.append(
-            {"path": relative_directory, "exists": exists, "files": files}
-        )
+        snapshots.append({"path": relative_directory, "exists": exists, "files": files})
     return snapshots
 
 
@@ -666,9 +670,10 @@ def _validate_checkpoint_artifacts(artifact_root: str | Path, snapshots: Any) ->
                 or any(character not in "0123456789abcdef" for character in expected_hash)
             ):
                 raise ValueError("checkpoint artifact file record is invalid")
-            if relative.parts[: len(Path(relative_directory).parts)] != Path(
-                relative_directory
-            ).parts:
+            if (
+                relative.parts[: len(Path(relative_directory).parts)]
+                != Path(relative_directory).parts
+            ):
                 raise ValueError("checkpoint artifact file is outside its recorded directory")
             path = root / relative
             try:

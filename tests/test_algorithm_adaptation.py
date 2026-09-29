@@ -212,13 +212,11 @@ def test_ppo_buffer_gae_matches_hand_calculation_for_terminal_and_truncation() -
         gae_lambda = model.gae_lambda
         expected_last_truncated = 2.0 + gamma * 0.5 - values[1]
         expected_first_truncated = (
-            1.0 + gamma * values[1] - values[0]
-            + gamma * gae_lambda * expected_last_truncated
+            1.0 + gamma * values[1] - values[0] + gamma * gae_lambda * expected_last_truncated
         )
         expected_last_terminated = 4.0 - values[3]
         expected_first_terminated = (
-            3.0 + gamma * values[3] - values[2]
-            + gamma * gae_lambda * expected_last_terminated
+            3.0 + gamma * values[3] - values[2] + gamma * gae_lambda * expected_last_terminated
         )
         expected_advantages = np.asarray(
             [
@@ -395,11 +393,17 @@ def test_sac_native_update_uses_fresh_post_only_replay_buffer() -> None:
         )
         np.testing.assert_array_equal(
             replay_snapshot["dones"],
-            [float(transition.terminated or transition.truncated) for transition in batch.transitions],
+            [
+                float(transition.terminated or transition.truncated)
+                for transition in batch.transitions
+            ],
         )
         np.testing.assert_array_equal(
             replay_snapshot["timeouts"],
-            [float(transition.truncated and not transition.terminated) for transition in batch.transitions],
+            [
+                float(transition.truncated and not transition.terminated)
+                for transition in batch.transitions
+            ],
         )
     finally:
         env.close()

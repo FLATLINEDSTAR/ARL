@@ -107,8 +107,7 @@ def _repository_metadata() -> dict[str, Any]:
             "cuda_available": torch.cuda.is_available(),
             "cuda_device_count": torch.cuda.device_count(),
             "cuda_device_names": [
-                torch.cuda.get_device_name(index)
-                for index in range(torch.cuda.device_count())
+                torch.cuda.get_device_name(index) for index in range(torch.cuda.device_count())
             ],
         }
     )
@@ -186,7 +185,7 @@ def _train_once(
     algorithm_parameters = dict(algorithm_config.parameters)
     algorithm_parameters["seed"] = int(training_seed)
     if smoke:
-        training.total_timesteps = 32
+        training.total_timesteps = min(training.total_timesteps, 32)
         if algorithm_config.name.lower() == "ppo":
             algorithm_parameters.update({"n_steps": 16, "n_epochs": 1})
             algorithm_config.batch_size = min(8, algorithm_config.batch_size)
@@ -569,10 +568,17 @@ def _run_replicate(
             get_effective = getattr(shock_env, "get_effective_parameters", None)
             effective = dict(get_effective()) if callable(get_effective) else shifted_params
             for key, expected in benchmark.shift_parameters.items():
-                if effective.get(key) != expected:
+                actual = effective.get(key)
+                numeric_match = (
+                    isinstance(expected, (int, float))
+                    and not isinstance(expected, bool)
+                    and isinstance(actual, (int, float))
+                    and np.isclose(actual, expected, rtol=1e-12, atol=1e-12)
+                )
+                if actual != expected and not numeric_match:
                     raise RuntimeError(
                         f"TEST-B parameter {key!r} did not apply: expected {expected!r}, "
-                        f"got {effective.get(key)!r}"
+                        f"got {actual!r}"
                     )
             result.effective_shift_parameters = effective
             result.shared_shock_episodes = _run_evaluation_segment(
@@ -731,11 +737,15 @@ def run_adaptation_benchmark(
             raise ValueError("prereg-v1 requires one non-smoke attempt of all ten seeds in order")
         if output_dir is not None and Path(output_dir).is_absolute():
             raise ValueError("prereg-v1 artifact output_dir must be relative to the repository")
-        selected_output_dir = Path(output_dir) if output_dir is not None else Path(config.output_dir)
+        selected_output_dir = (
+            Path(output_dir) if output_dir is not None else Path(config.output_dir)
+        )
         try:
             selected_output_dir.resolve().relative_to(repository_root)
         except ValueError as exc:
-            raise ValueError("prereg-v1 artifact output_dir must stay inside the repository") from exc
+            raise ValueError(
+                "prereg-v1 artifact output_dir must stay inside the repository"
+            ) from exc
         if Path(config_arg).is_absolute():
             raise ValueError("prereg-v1 config path must be repository-relative")
         try:
@@ -750,10 +760,7 @@ def run_adaptation_benchmark(
             raise ValueError("prereg-v1 config differs from the frozen Issue #271 configuration")
         if card_sha != ISSUE271_TREATMENT_CARD_SHA256:
             raise ValueError("prereg-v1 Treatment Card differs from the frozen treatment")
-    if (
-        config.algorithm.name.strip().lower() == "ppo"
-        and config.evaluation.deterministic
-    ):
+    if config.algorithm.name.strip().lower() == "ppo" and config.evaluation.deterministic:
         raise ValueError(
             "PPO adaptation requires stochastic behavior-policy action sampling; "
             "deterministic mean actions are not valid on-policy rollout data"
@@ -789,9 +796,7 @@ def run_adaptation_benchmark(
             "artifact_schema_version": STUDY_ARTIFACT_SCHEMA_VERSION,
             "manifest_schema_version": STUDY_MANIFEST_SCHEMA_VERSION,
             "replicate_checkpoint_schema_version": REPLICATE_CHECKPOINT_SCHEMA_VERSION,
-            "study_config": config.model_dump(
-                mode="json", exclude={"output_dir", "log_dir"}
-            ),
+            "study_config": config.model_dump(mode="json", exclude={"output_dir", "log_dir"}),
             "canonical_config_sha256": compute_config_sha256(config),
             "treatment_card_sha256": card_sha,
             "protocol_version": benchmark.protocol_version,
@@ -833,7 +838,9 @@ def run_adaptation_benchmark(
     else:
         for suffix in (*suffixes, "manifest.json"):
             if (target_dir / suffix).exists():
-                raise FileExistsError(f"refusing to overwrite existing artifact: {target_dir / suffix}")
+                raise FileExistsError(
+                    f"refusing to overwrite existing artifact: {target_dir / suffix}"
+                )
     training_root = target_dir / "training"
     state_root = target_dir / "replicate_state"
     if study_run_id is not None and state_root.exists() and not resume:

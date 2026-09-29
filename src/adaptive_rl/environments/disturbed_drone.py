@@ -323,7 +323,10 @@ class DroneDisturbed3DEnv(DroneNavigation3DEnv):
         disturbance_event_factor: float = 1.5,
         recovery_speed_tolerance: float = 1.0,
         recovery_hold_steps: int = 5,
+        wind_direction: Optional[Tuple[float, float, float]] = None,
     ) -> None:
+        if wind_direction is not None:
+            steady_wind = wind_direction
         super().__init__(
             bounds=bounds,
             start_pos=start_pos,
@@ -357,7 +360,9 @@ class DroneDisturbed3DEnv(DroneNavigation3DEnv):
         self.max_acceleration = float(max_acceleration)
         self.num_dynamic_obstacles = int(num_dynamic_obstacles)
         self.dynamic_obstacle_speed = float(dynamic_obstacle_speed)
-        self.wind_speed: Optional[float] = None if wind_speed is None else float(wind_speed)
+        self._configured_wind_speed: Optional[float] = (
+            None if wind_speed is None else float(wind_speed)
+        )
         self.disturbance_strength = float(disturbance_strength)
         self.disturbance_theta = float(disturbance_theta)
         self.disturbance_event_threshold_override = (
@@ -377,8 +382,8 @@ class DroneDisturbed3DEnv(DroneNavigation3DEnv):
             altitude_shear=altitude_shear,
             dt=self.dt,
         )
-        if self.wind_speed is not None:
-            self._apply_wind_speed(self.wind_speed)
+        if self._configured_wind_speed is not None:
+            self._apply_wind_speed(self._configured_wind_speed)
 
         self._dynamic_obstacles: List[DynamicObstacleSphere3D] = []
         self._injected_disturbance = np.zeros(3, dtype=np.float64)
@@ -457,7 +462,7 @@ class DroneDisturbed3DEnv(DroneNavigation3DEnv):
             if key == "wind_speed":
                 if value is not None:
                     self._apply_wind_speed(float(value))
-                    self.wind_speed = float(value)
+                    self._configured_wind_speed = float(value)
             elif key == "steady_wind":
                 self.wind_field.steady_wind = np.array(value, dtype=np.float64)
             elif key == "gust_sigma":
@@ -560,6 +565,9 @@ class DroneDisturbed3DEnv(DroneNavigation3DEnv):
         info.update(self._recovery.telemetry())
         return info
 
+    def _wind_velocity(self, position: np.ndarray) -> np.ndarray:
+        return self.wind_field.get_wind(position).total.copy()
+
     def reset(
         self,
         *,
@@ -570,8 +578,8 @@ class DroneDisturbed3DEnv(DroneNavigation3DEnv):
         super().reset(seed=seed, options=options)
 
         self.wind_field.reset()
-        if self.wind_speed is not None:
-            self._apply_wind_speed(self.wind_speed)
+        if self._configured_wind_speed is not None:
+            self._apply_wind_speed(self._configured_wind_speed)
 
         self._injected_disturbance = np.zeros(3, dtype=np.float64)
         self._last_disturbance_magnitude = 0.0

@@ -28,7 +28,6 @@ app = typer.Typer(
 
 benchmark_app = typer.Typer(
     name="benchmark",
-    help="Benchmark commands for learning curves and online adaptation.",
     help="Benchmarking and comparative evaluation commands.",
     no_args_is_help=True,
 )
@@ -548,13 +547,20 @@ def benchmark_adaptation(
     algorithm: Optional[str] = typer.Option(
         None, "--algorithm", help="Algorithm cell: ppo or sac (defaults to config value)"
     ),
+    timesteps: Optional[int] = typer.Option(
+        None, "--timesteps", "-t", help="Smoke training budget, capped at the smoke limit"
+    ),
     training_seeds: Optional[str] = typer.Option(
         None,
+        "--seeds",
         "--training-seeds",
         help="Comma-separated preregistered training seeds; defaults to all ten",
     ),
     output_dir: Optional[Path] = typer.Option(
-        None, "--output-dir", help="Directory for Issue #265 JSON/CSV and training artifacts"
+        None,
+        "--output",
+        "--output-dir",
+        help="Directory for Issue #265 JSON/CSV and training artifacts",
     ),
     study: Optional[str] = typer.Option(
         None, "--study", help="Run the immutable full protocol study (currently prereg-v1)"
@@ -574,6 +580,7 @@ def benchmark_adaptation(
     ),
     smoke: bool = typer.Option(
         False,
+        "--quick",
         "--smoke",
         help="Run one explicitly labeled, reduced-size machinery check (not research data)",
     ),
@@ -611,6 +618,15 @@ def benchmark_adaptation(
             evaluation_config = exp_config.evaluation.model_copy(deep=True)
             evaluation_config.deterministic = deterministic
             exp_config = exp_config.model_copy(update={"evaluation": evaluation_config}, deep=True)
+
+        if timesteps is not None:
+            if timesteps <= 0:
+                raise ValueError("--timesteps must be positive")
+            if not smoke:
+                raise ValueError("--timesteps is available only with --quick/--smoke")
+            if exp_config.training is None:
+                raise ValueError("--timesteps requires a training configuration")
+            exp_config.training.total_timesteps = timesteps
 
         selected_seeds = None
         if training_seeds is not None:
@@ -668,115 +684,6 @@ def benchmark_adaptation(
     )
     if failed:
         raise typer.Exit(code=1)
-@app.command(name="benchmark-adaptation")
-def benchmark_adaptation(
-    seeds: Optional[str] = typer.Option(
-        None, "--seeds", help="Comma-separated training seeds (e.g. 31001,31002)"
-    ),
-    timesteps: int = typer.Option(
-        60000, "--timesteps", "-t", help="Total nominal training timesteps per replicate"
-    ),
-    quick: bool = typer.Option(
-        False, "--quick", help="Run in fast smoke test mode (2 replicates, short budget)"
-    ),
-    output_dir: Path = typer.Option(
-        Path("artifacts/benchmarks"),
-        "--output",
-        "-o",
-        help="Output directory for benchmark artifacts",
-    ),
-) -> None:
-    """Run the preregistered online adaptation benchmark (Adaptive vs Fixed policy)."""
-    from adaptive_rl.experiments.shift_runner import AdaptiveShiftRunner
-    from adaptive_rl.protocol.constants import TRAINING_SEEDS
-
-    training_seed_list: List[int]
-    if seeds is not None:
-        training_seed_list = [int(s.strip()) for s in seeds.split(",") if s.strip()]
-    elif quick:
-        training_seed_list = [31001, 31002]
-    else:
-        training_seed_list = list(TRAINING_SEEDS)
-
-    console.print(
-        Panel.fit(
-            f"[bold cyan]Running Online Adaptation Benchmark (Protocol v2.0)[/bold cyan]\n\n"
-            f"• [bold]Condition:[/bold] TEST-B (12 Obstacles, 4.0 m/s Steady Wind, 0.6 Gust Volatility)\n"
-            f"• [bold]Replicates:[/bold] {len(training_seed_list)} (Seeds: {training_seed_list})\n"
-            f"• [bold]Mode:[/bold] {'Quick Smoke Test' if quick else 'Full Protocol Run'}\n"
-            f"• [bold]Output Directory:[/bold] {output_dir}",
-            title="AdaptiveRL Benchmark",
-            border_style="cyan",
-        )
-    )
-
-    runner = AdaptiveShiftRunner(
-        training_seeds=training_seed_list,
-        training_timesteps=timesteps,
-        output_dir=str(output_dir),
-        quick_test_mode=quick,
-    )
-
-    with console.status("[bold green]Executing benchmark replicates...[/bold green]"):
-        report = runner.run()
-
-    stats = report["statistics"]
-    reps = report["replicates"]
-
-    # Replicate summary table
-    table = Table(title="Replicate Results (Adaptive vs Fixed Policy)", border_style="cyan")
-    table.add_column("Rep", justify="right", style="cyan")
-    table.add_column("Seed", justify="right")
-    table.add_column("P_pre", justify="right")
-    table.add_column("P0 (Shock)", justify="right")
-    table.add_column("Fixed T_H", justify="right", style="red")
-    table.add_column("Adaptive T_H", justify="right", style="green")
-    table.add_column("D_i (Diff)", justify="right", style="bold yellow")
-    table.add_column("Fixed Status", justify="left")
-    table.add_column("Adaptive Status", justify="left")
-
-    for r in reps:
-        d_val = r["d_i"]
-        table.add_row(
-            str(r["replicate_index"]),
-            str(r["training_seed"]),
-            f"{r['fixed_recovery']['p_pre']:.2f}",
-            f"{r['fixed_recovery']['p0']:.2f}",
-            str(r["fixed_recovery"]["truncated_recovery_time"]),
-            str(r["adaptive_recovery"]["truncated_recovery_time"]),
-            f"{d_val:+.1f}",
-            r["fixed_recovery"]["status"],
-            r["adaptive_recovery"]["status"],
-        )
-
-    console.print(table)
-
-    # Statistical summary panel
-    ci = stats["confidence_interval_95"]
-    ci_str = f"[{ci[0]:.2f}, {ci[1]:.2f}]"
-    cohen_str = f"{stats['cohens_dz']:.3f}" if stats.get("cohens_dz") is not None else "N/A"
-    p_val = stats["p_value_onesided"]
-
-    decision_style = "bold green" if p_val < 0.05 and stats["mean_d"] < 0 else "bold yellow"
-
-    console.print(
-        Panel.fit(
-            f"[{decision_style}]Statistical Analysis (One-Sided Paired t-test for H1: mu_D < 0)[/{decision_style}]\n\n"
-            f"• [bold]Mean Difference (D_mean):[/bold] {stats['mean_d']:+.3f} episodes\n"
-            f"• [bold]Sample Std Dev (s_D):[/bold] {stats['std_d']:.3f}\n"
-            f"• [bold]Standard Error (SE):[/bold] {stats['se_d']:.3f}\n"
-            f"• [bold]t-statistic:[/bold] {stats['t_statistic']:.3f}\n"
-            f"• [bold]p-value (one-sided):[/bold] {p_val:.4f}\n"
-            f"• [bold]95% Confidence Interval:[/bold] {ci_str}\n"
-            f"• [bold]Cohen's d_z:[/bold] {cohen_str}\n"
-            f"• [bold]Sign Test p-value:[/bold] {stats['sign_test_p']:.4f}\n"
-            f"• [bold]Wilcoxon Signed-Rank p-value:[/bold] {stats['wilcoxon_p']:.4f}\n\n"
-            f"• [bold]JSON Report:[/bold] {output_dir / 'adaptive_vs_fixed.json'}\n"
-            f"• [bold]CSV Summary:[/bold] {output_dir / 'adaptive_vs_fixed.csv'}",
-            title="Benchmark Outcome",
-            border_style="green" if p_val < 0.05 and stats["mean_d"] < 0 else "yellow",
-        )
-    )
 
 
 @app.command(context_settings={"allow_extra_args": True})
