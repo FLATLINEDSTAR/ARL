@@ -59,8 +59,6 @@ class TrainingResult:
     training_time_seconds: float = 0.0
 
 
-class AlgorithmTrainer:
-    """Trainer orchestrating supported Stable-Baselines3 algorithm learning."""
 class RLTrainer:
     """Trainer orchestrating reinforcement learning policy learning on the drone navigation environment."""
 
@@ -99,19 +97,6 @@ class RLTrainer:
         gamma = algo_params.pop("gamma", self.config.algorithm.gamma)
         batch_size = algo_params.pop("batch_size", self.config.algorithm.batch_size)
         seed = algo_params.pop("seed", self.config.seed)
-        algorithm_name = self.config.algorithm.name.strip().lower()
-        algorithm_types = {"ppo": PPOAlgorithm, "sac": SACAlgorithm}
-        if algorithm_name not in algorithm_types:
-            raise ValueError(f"Unsupported training algorithm: {self.config.algorithm.name!r}")
-        self.algorithm = algorithm_types[algorithm_name](
-            env=self.env,
-            learning_rate=lr,
-            gamma=gamma,
-            batch_size=batch_size,
-            seed=seed,
-            **algo_params,
-        )
-
         algo_name = self.config.algorithm.name.lower()
         self.algorithm: BaseAlgorithm
         if algo_name == "ppo":
@@ -262,12 +247,6 @@ class RLTrainer:
             )
 
 
-class PPOTrainer(AlgorithmTrainer):
-    """Trainer for PPO; retained as the explicit PPO-facing public class."""
-
-
-class SACTrainer(AlgorithmTrainer):
-    """Trainer for SAC using the same callbacks and artifact lifecycle."""
 PPOTrainer = RLTrainer
 
 
@@ -275,13 +254,6 @@ def get_trainer(
     config: ExperimentConfig,
     env: Optional[gym.Env] = None,
     callbacks: Optional[List[BaseCallback]] = None,
-) -> AlgorithmTrainer:
-    """Factory for the configured PPO or SAC algorithm trainer."""
-    trainer_types = {"ppo": PPOTrainer, "sac": SACTrainer}
-    algorithm_name = config.algorithm.name.strip().lower()
-    if algorithm_name not in trainer_types:
-        raise ValueError(f"Unsupported training algorithm: {config.algorithm.name!r}")
-    return trainer_types[algorithm_name](config=config, env=env, callbacks=callbacks)
 ) -> RLTrainer:
     """Factory returning the trainer based on configuration."""
     return RLTrainer(config=config, env=env, callbacks=callbacks)

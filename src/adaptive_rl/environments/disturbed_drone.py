@@ -313,6 +313,7 @@ class DroneDisturbed3DEnv(DroneNavigation3DEnv):
         # Environmental disturbance parameters
         wind_speed: Optional[float] = None,
         steady_wind: Tuple[float, float, float] = (1.5, 0.5, 0.0),
+        wind_direction: Optional[Tuple[float, float, float]] = None,
         gust_theta: float = 0.15,
         gust_sigma: float = 0.0,
         max_gust: float = 4.0,
@@ -357,7 +358,7 @@ class DroneDisturbed3DEnv(DroneNavigation3DEnv):
         self.max_acceleration = float(max_acceleration)
         self.num_dynamic_obstacles = int(num_dynamic_obstacles)
         self.dynamic_obstacle_speed = float(dynamic_obstacle_speed)
-        self.wind_speed: Optional[float] = None if wind_speed is None else float(wind_speed)
+        self._wind_speed_override = None if wind_speed is None else float(wind_speed)
         self.disturbance_strength = float(disturbance_strength)
         self.disturbance_theta = float(disturbance_theta)
         self.disturbance_event_threshold_override = (
@@ -370,15 +371,20 @@ class DroneDisturbed3DEnv(DroneNavigation3DEnv):
         self.recovery_hold_steps = int(recovery_hold_steps)
 
         self.wind_field = WindField3D(
-            steady_wind=steady_wind,
+            steady_wind=steady_wind if wind_direction is None else wind_direction,
             gust_theta=gust_theta,
             gust_sigma=gust_sigma,
             max_gust=max_gust,
             altitude_shear=altitude_shear,
             dt=self.dt,
         )
-        if self.wind_speed is not None:
-            self._apply_wind_speed(self.wind_speed)
+        if self._wind_speed_override is not None:
+            self._apply_wind_speed(self._wind_speed_override)
+        self.wind_speed = (
+            self._wind_speed_override
+            if self._wind_speed_override is not None
+            else float(np.linalg.norm(self.wind_field.steady_wind))
+        )
 
         self._dynamic_obstacles: List[DynamicObstacleSphere3D] = []
         self._injected_disturbance = np.zeros(3, dtype=np.float64)
@@ -440,7 +446,7 @@ class DroneDisturbed3DEnv(DroneNavigation3DEnv):
             "obstacle_radius": float(self.obstacle_radius),
             "dynamic_obstacle_speed": float(self.dynamic_obstacle_speed),
             "steady_wind": steady,
-            "wind_speed": float(np.linalg.norm(self.wind_field.steady_wind)),
+            "wind_speed": float(self.wind_speed),
             "gust_theta": float(self.wind_field.gust_theta),
             "gust_sigma": float(self.wind_field.gust_sigma),
             "disturbance_strength": float(self.disturbance_strength),
@@ -458,8 +464,11 @@ class DroneDisturbed3DEnv(DroneNavigation3DEnv):
                 if value is not None:
                     self._apply_wind_speed(float(value))
                     self.wind_speed = float(value)
+                    self._wind_speed_override = float(value)
             elif key == "steady_wind":
                 self.wind_field.steady_wind = np.array(value, dtype=np.float64)
+                self.wind_speed = float(np.linalg.norm(self.wind_field.steady_wind))
+                self._wind_speed_override = None
             elif key == "gust_sigma":
                 self.wind_field.gust_sigma = float(value)
             elif key == "gust_theta":
@@ -560,6 +569,10 @@ class DroneDisturbed3DEnv(DroneNavigation3DEnv):
         info.update(self._recovery.telemetry())
         return info
 
+    def _wind_velocity(self, position: np.ndarray) -> np.ndarray:
+        """Report the same effective wind field used by the disturbed dynamics."""
+        return self.wind_field.get_wind(position).total
+
     def reset(
         self,
         *,
@@ -570,8 +583,8 @@ class DroneDisturbed3DEnv(DroneNavigation3DEnv):
         super().reset(seed=seed, options=options)
 
         self.wind_field.reset()
-        if self.wind_speed is not None:
-            self._apply_wind_speed(self.wind_speed)
+        if self._wind_speed_override is not None:
+            self._apply_wind_speed(self._wind_speed_override)
 
         self._injected_disturbance = np.zeros(3, dtype=np.float64)
         self._last_disturbance_magnitude = 0.0

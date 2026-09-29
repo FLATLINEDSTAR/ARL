@@ -1,4 +1,3 @@
-"""Tools for validating immutable preregistered experiment packages."""
 """Experiments module for AdaptiveRL."""
 
 from __future__ import annotations

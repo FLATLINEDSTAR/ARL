@@ -28,7 +28,6 @@ app = typer.Typer(
 
 benchmark_app = typer.Typer(
     name="benchmark",
-    help="Benchmark commands for learning curves and online adaptation.",
     help="Benchmarking and comparative evaluation commands.",
     no_args_is_help=True,
 )
@@ -577,11 +576,18 @@ def benchmark_adaptation(
     ),
     training_seeds: Optional[str] = typer.Option(
         None,
+        "--seeds",
         "--training-seeds",
         help="Comma-separated preregistered training seeds; defaults to all ten",
     ),
     output_dir: Optional[Path] = typer.Option(
-        None, "--output-dir", help="Directory for Issue #265 JSON/CSV and training artifacts"
+        None,
+        "--output-dir",
+        "--output",
+        help="Directory for Issue #265 JSON/CSV and training artifacts",
+    ),
+    timesteps: Optional[int] = typer.Option(
+        None, "--timesteps", "-t", help="Total nominal training timesteps per replicate"
     ),
     study: Optional[str] = typer.Option(
         None, "--study", help="Run the immutable full protocol study (currently prereg-v1)"
@@ -602,12 +608,23 @@ def benchmark_adaptation(
     smoke: bool = typer.Option(
         False,
         "--smoke",
+        "--quick",
         help="Run one explicitly labeled, reduced-size machinery check (not research data)",
     ),
 ) -> None:
     """Run the preregistered train-once, forked Adaptive-vs-Fixed experiment."""
     try:
         exp_config = load_config(config)
+        if timesteps is not None:
+            if timesteps < 1:
+                raise ValueError("--timesteps must be a positive integer")
+            if exp_config.training is None:
+                raise ValueError("--timesteps requires a training configuration")
+            training_config = exp_config.training.model_copy(
+                update={"total_timesteps": timesteps}, deep=True
+            )
+            exp_config = exp_config.model_copy(update={"training": training_config}, deep=True)
+
         if algorithm is not None:
             selected_algorithm = algorithm.strip().lower()
             if selected_algorithm not in {"ppo", "sac"}:
@@ -695,8 +712,10 @@ def benchmark_adaptation(
     )
     if failed:
         raise typer.Exit(code=1)
+
+
 @app.command(name="benchmark-adaptation")
-def benchmark_adaptation(
+def benchmark_adaptation_legacy(
     seeds: Optional[str] = typer.Option(
         None, "--seeds", help="Comma-separated training seeds (e.g. 31001,31002)"
     ),
