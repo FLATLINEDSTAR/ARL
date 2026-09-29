@@ -150,29 +150,6 @@ class BenchmarkConfig(BaseModel):
         return values
 
 
-class AdaptationBenchmarkConfig(BaseModel):
-    """Frozen TEST-B cell declaration for Issue #265."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    protocol_version: str = "2.0"
-    scenario: str = "TEST-B"
-    shift_parameters: Dict[str, Any] = Field(
-        default_factory=lambda: {"num_obstacles": 12, "wind_speed": 4.0, "gust_sigma": 0.6}
-    )
-
-    @model_validator(mode="after")
-    def _validate_test_b(self) -> "AdaptationBenchmarkConfig":
-        expected = {"num_obstacles": 12, "wind_speed": 4.0, "gust_sigma": 0.6}
-        if self.protocol_version != "2.0":
-            raise ValueError("Issue #265 requires protocol_version '2.0'")
-        if self.scenario != "TEST-B" or self.shift_parameters != expected:
-            raise ValueError(
-                "Issue #265's primary cell is exactly TEST-B (12 obstacles, wind 4.0, gust 0.6)"
-            )
-        return self
-
-
 class ExperimentConfig(BaseModel):
     """Top-level configuration schema for an AdaptiveRL experiment."""
 
@@ -195,10 +172,6 @@ class ExperimentConfig(BaseModel):
     benchmark: Optional[BenchmarkConfig] = Field(
         default=None,
         description="Optional benchmark settings for training-budget learning curves.",
-    )
-    adaptation_benchmark: Optional[AdaptationBenchmarkConfig] = Field(
-        default=None,
-        description="Frozen Issue #265 TEST-B online-adaptation cell.",
     )
 
     @model_validator(mode="before")

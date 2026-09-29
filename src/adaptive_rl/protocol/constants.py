@@ -101,17 +101,6 @@ SEED_VALUE_MAX: int = 0x7FFFFFFF
 #: Number of planned replicate pairs per cell (len(TRAINING_SEEDS)).
 PLANNED_N: int = len(TRAINING_SEEDS)
 
-# Issue #271 prereg-v1 freezes one PPO cell and its semantic config/treatment.
-# These hashes are declared in docs/research/issue-271.md and require a new
-# study version if either scientific input changes.
-ISSUE271_CONFIG_SHA256: str = "0039c298b5048254b2d211cc66967e9d3e1d71275575fcfe28736485c65937b5"
-ISSUE271_TREATMENT_CARD_SHA256: str = (
-    "8383e736f02ff31393474b241b06d2dc92b036910c93c26081c1673c92a317e3"
-)
-ISSUE273_TREATMENT_CARD_SHA256: str = (
-    "ab9528d4b98a76be1de7d18808aecd65990abc48b9489d5fd5e661ce97d3a312"
-)
-
 __all__ = [
     "ALPHA",
     "BOOTSTRAP_REPS",
@@ -119,9 +108,6 @@ __all__ = [
     "CONFIG_TEST_POOL",
     "CONFIG_TRAIN_POOL",
     "HORIZON",
-    "ISSUE271_CONFIG_SHA256",
-    "ISSUE271_TREATMENT_CARD_SHA256",
-    "ISSUE273_TREATMENT_CARD_SHA256",
     "K_PRE",
     "MIN_DEGRADATION_SE_MULTIPLIER",
     "MIN_VALID_N",

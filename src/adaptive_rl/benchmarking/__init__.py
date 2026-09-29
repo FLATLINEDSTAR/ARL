@@ -9,12 +9,6 @@ only when a benchmark actually executes.
 from importlib import import_module
 from typing import Any
 
-from adaptive_rl.benchmarking.adaptation_artifacts import write_adaptation_artifacts
-from adaptive_rl.benchmarking.adaptation_statistics import (
-    PairedRecoveryAnalysis,
-    analyze_paired_recovery,
-    analyze_primary_cells,
-)
 from adaptive_rl.benchmarking.learning_curve import (
     BenchmarkRunError,
     LearningCurveBenchmarkResult,
@@ -65,11 +59,7 @@ __all__ = [
     "BenchmarkRunError",
     "LearningCurveBenchmarkResult",
     "LearningCurvePoint",
-    "PairedRecoveryAnalysis",
-    "analyze_paired_recovery",
-    "analyze_primary_cells",
     "plot_learning_curve",
     "run_learning_curve_benchmark",
     "validate_budgets",
-    "write_adaptation_artifacts",
 ]

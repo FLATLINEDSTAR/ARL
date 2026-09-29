@@ -97,6 +97,7 @@ class RLTrainer:
         gamma = algo_params.pop("gamma", self.config.algorithm.gamma)
         batch_size = algo_params.pop("batch_size", self.config.algorithm.batch_size)
         seed = algo_params.pop("seed", self.config.seed)
+
         algo_name = self.config.algorithm.name.lower()
         self.algorithm: BaseAlgorithm
         if algo_name == "ppo":

@@ -47,12 +47,6 @@ env_app = typer.Typer(
 )
 app.add_typer(env_app, name="env")
 
-experiment_app = typer.Typer(
-    name="experiment",
-    help="Immutable experiment package validation commands.",
-    no_args_is_help=True,
-)
-app.add_typer(experiment_app, name="experiment")
 inspect_app = typer.Typer(
     name="inspect",
     help="Inspection commands for experiment manifests, environments, and configurations.",
@@ -72,27 +66,6 @@ console = Console()
 
 def _format_metric(value: float | None) -> str:
     return f"{value:.3f}" if value is not None else "N/A"
-
-
-@experiment_app.command(name="validate")
-def validate_experiment(
-    package_dir: Path = typer.Argument(..., help="Immutable study result package directory"),
-    certificate: Optional[Path] = typer.Option(
-        None, "--certificate", help="Write validation report outside the package (must not exist)"
-    ),
-) -> None:
-    """Validate package integrity and preregistered claim eligibility."""
-    from adaptive_rl.experiments.validator import validate_result_package
-
-    report = validate_result_package(package_dir, certificate_path=certificate)
-    for check in report["checks"]:
-        color = "green" if check["status"] == "PASS" else "red"
-        console.print(f"[{color}]{check['status']}[/{color}] {check['id']}: {check['message']}")
-    console.print(
-        f"[bold {'green' if report['verdict'] == 'PASS' else 'red'}]Verdict: {report['verdict']}[/bold {'green' if report['verdict'] == 'PASS' else 'red'}]"
-    )
-    if report["verdict"] != "PASS":
-        raise typer.Exit(code=1)
 
 
 @app.command()
@@ -564,158 +537,8 @@ def benchmark_budgets(
 
 
 @benchmark_app.command(name="adaptation")
-def benchmark_adaptation(
-    config: Path = typer.Option(
-        Path("configs/drone_distribution_shift.yaml"),
-        "--config",
-        "-c",
-        help="Issue #265 nominal training and TEST-B configuration",
-    ),
-    algorithm: Optional[str] = typer.Option(
-        None, "--algorithm", help="Algorithm cell: ppo or sac (defaults to config value)"
-    ),
-    training_seeds: Optional[str] = typer.Option(
-        None,
-        "--seeds",
-        "--training-seeds",
-        help="Comma-separated preregistered training seeds; defaults to all ten",
-    ),
-    output_dir: Optional[Path] = typer.Option(
-        None,
-        "--output-dir",
-        "--output",
-        help="Directory for Issue #265 JSON/CSV and training artifacts",
-    ),
-    timesteps: Optional[int] = typer.Option(
-        None, "--timesteps", "-t", help="Total nominal training timesteps per replicate"
-    ),
-    study: Optional[str] = typer.Option(
-        None, "--study", help="Run the immutable full protocol study (currently prereg-v1)"
-    ),
-    run_id: Optional[str] = typer.Option(
-        None, "--run-id", help="Unique immutable output directory name required with --study"
-    ),
-    resume: bool = typer.Option(
-        False,
-        "--resume",
-        help="Reuse only complete hashed replicate checkpoints for an unfinished study run",
-    ),
-    deterministic: Optional[bool] = typer.Option(
-        None,
-        "--deterministic/--stochastic",
-        help="Override evaluation action selection; PPO adaptation requires stochastic actions",
-    ),
-    smoke: bool = typer.Option(
-        False,
-        "--smoke",
-        "--quick",
-        help="Run one explicitly labeled, reduced-size machinery check (not research data)",
-    ),
-) -> None:
-    """Run the preregistered train-once, forked Adaptive-vs-Fixed experiment."""
-    try:
-        exp_config = load_config(config)
-        if timesteps is not None:
-            if timesteps < 1:
-                raise ValueError("--timesteps must be a positive integer")
-            if exp_config.training is None:
-                raise ValueError("--timesteps requires a training configuration")
-            training_config = exp_config.training.model_copy(
-                update={"total_timesteps": timesteps}, deep=True
-            )
-            exp_config = exp_config.model_copy(update={"training": training_config}, deep=True)
-
-        if algorithm is not None:
-            selected_algorithm = algorithm.strip().lower()
-            if selected_algorithm not in {"ppo", "sac"}:
-                raise ValueError("--algorithm must be 'ppo' or 'sac'")
-            algorithm_config = exp_config.algorithm.model_copy(deep=True)
-            if selected_algorithm != algorithm_config.name.strip().lower():
-                algorithm_config.name = selected_algorithm
-                if selected_algorithm == "sac":
-                    algorithm_config.parameters = {
-                        "buffer_size": 100_000,
-                        "learning_starts": 100,
-                        "train_freq": 1,
-                        "gradient_steps": 1,
-                        "tau": 0.005,
-                        "ent_coef": "auto",
-                    }
-                else:
-                    algorithm_config.parameters = {
-                        "n_steps": 1024,
-                        "n_epochs": 10,
-                        "clip_range": 0.2,
-                        "ent_coef": 0.01,
-                    }
-                exp_config = exp_config.model_copy(
-                    update={"algorithm": algorithm_config}, deep=True
-                )
-        if deterministic is not None:
-            evaluation_config = exp_config.evaluation.model_copy(deep=True)
-            evaluation_config.deterministic = deterministic
-            exp_config = exp_config.model_copy(update={"evaluation": evaluation_config}, deep=True)
-
-        selected_seeds = None
-        if training_seeds is not None:
-            tokens = [token.strip() for token in training_seeds.split(",")]
-            if not tokens or any(not token for token in tokens):
-                raise ValueError("--training-seeds expects comma-separated integers")
-            try:
-                selected_seeds = [int(token) for token in tokens]
-            except ValueError as exc:
-                raise ValueError("--training-seeds expects comma-separated integers") from exc
-
-        from adaptive_rl.benchmarking.adaptation_runner import run_adaptation_benchmark
-
-        if study not in {None, "prereg-v1"}:
-            raise ValueError("--study currently supports only prereg-v1")
-        if (study is None) != (run_id is None):
-            raise ValueError("--study and --run-id must be supplied together")
-        if resume and study is None:
-            raise ValueError("--resume requires --study prereg-v1 and --run-id")
-
-        artifact = run_adaptation_benchmark(
-            exp_config,
-            output_dir=output_dir,
-            training_seeds=selected_seeds,
-            smoke=smoke,
-            config_path=config,
-            study_run_id=run_id if study is not None else None,
-            resume=resume,
-        )
-    except Exception as err:
-        console.print(f"[bold red]Issue #265 benchmark failed:[/bold red] {err}")
-        raise typer.Exit(code=1)
-
-    failed = artifact["failure_summary"]["failed_replicates"]
-    completed = artifact["failure_summary"]["completed_replicates"]
-    json_artifact_path = Path(artifact["artifact_paths"]["json"])
-    csv_artifact_path = Path(artifact["artifact_paths"]["csv"])
-    if study is not None and run_id is not None:
-        study_dir = (output_dir or exp_config.output_dir) / run_id
-        json_artifact_path = study_dir / json_artifact_path
-        csv_artifact_path = study_dir / csv_artifact_path
-    console.print(
-        Panel.fit(
-            f"[bold]{'Smoke check' if smoke else 'Issue #265 benchmark'} finished[/bold]\n\n"
-            f"• [bold]Run type:[/bold] {artifact['run_type']}\n"
-            f"• [bold]Algorithm:[/bold] {artifact['experiment']['algorithm']}\n"
-            f"• [bold]Completed replicates:[/bold] {completed}\n"
-            f"• [bold]Failed replicates:[/bold] {len(failed)}\n"
-            f"• [bold]JSON:[/bold] {json_artifact_path}\n"
-            f"• [bold]CSV:[/bold] {csv_artifact_path}\n"
-            f"• [bold]Scientific result:[/bold] not established by harness execution",
-            title="Online Adaptation Benchmark",
-            border_style="yellow" if smoke or failed else "green",
-        )
-    )
-    if failed:
-        raise typer.Exit(code=1)
-
-
 @app.command(name="benchmark-adaptation")
-def benchmark_adaptation_legacy(
+def benchmark_adaptation(
     seeds: Optional[str] = typer.Option(
         None, "--seeds", help="Comma-separated training seeds (e.g. 31001,31002)"
     ),

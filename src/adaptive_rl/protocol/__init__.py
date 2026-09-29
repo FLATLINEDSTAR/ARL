@@ -9,15 +9,6 @@ implement the future Adaptive treatment harness, do not modify
 ``shift_runner.py``, and do not make any experimental cell executable.
 """
 
-from adaptive_rl.protocol.adaptation import (
-    AdaptationAdapter,
-    PostShiftEpisode,
-    Transition,
-    UpdateBatch,
-    build_update_batch,
-    call_update_atomically,
-    validate_block_sequence,
-)
 from adaptive_rl.protocol.constants import (
     ALPHA,
     BOOTSTRAP_REPS,
@@ -54,19 +45,14 @@ from adaptive_rl.protocol.recovery import (
     recovery_threshold_met,
     trailing_window_means,
 )
-from adaptive_rl.protocol.seed_schedule import (
-    DOMAINS,
+from adaptive_rl.protocol.seeds import (
     PHASES,
-    SEED_SCHEDULE_VERSION,
-    LegacySeedError,
-    ScheduleValidationError,
     build_schedule,
+    derive_seed,
     frozen_schedule,
     schedule_fingerprint,
-    validate_replicate_schedules,
     validate_schedule,
 )
-from adaptive_rl.protocol.seeds import derive_seed
 from adaptive_rl.protocol.statistics import (
     IMPUTATION_DIRECTIONS,
     FamilyDecision,
@@ -88,18 +74,15 @@ from adaptive_rl.protocol.statistics import (
 )
 
 __all__ = [
-    "AdaptationAdapter",
     "ALPHA",
     "BOOTSTRAP_REPS",
     "BOOTSTRAP_SEED",
     "CONFIG_TEST_POOL",
     "CONFIG_TRAIN_POOL",
     "FamilyDecision",
-    "DOMAINS",
     "HORIZON",
     "IMPUTATION_DIRECTIONS",
     "K_PRE",
-    "LegacySeedError",
     "MIN_DEGRADATION_SE_MULTIPLIER",
     "MIN_VALID_N",
     "NON_RECOVERY_STATUSES",
@@ -112,27 +95,20 @@ __all__ = [
     "PROTOCOL_VERSION",
     "PairedTTest",
     "PERSISTENCE",
-    "PostShiftEpisode",
     "RECOVERY_STATUSES",
     "RECOVERY_THRESHOLD",
     "RecoveryResult",
     "SEED_VALUE_MAX",
-    "SEED_SCHEDULE_VERSION",
-    "ScheduleValidationError",
     "STATUS_DEGRADATION_BELOW_RESOLUTION",
     "STATUS_NO_DEGRADATION",
     "STATUS_RECOVERED",
     "STATUS_RIGHT_CENSORED",
     "SignTestResult",
     "TRAINING_SEEDS",
-    "Transition",
-    "UpdateBatch",
     "WINDOW",
     "WilcoxonResult",
     "bootstrap_percentile_ci",
     "build_schedule",
-    "build_update_batch",
-    "call_update_atomically",
     "cohen_dz",
     "compute_recovery",
     "decide_family",
@@ -152,7 +128,5 @@ __all__ = [
     "student_t_cdf",
     "student_t_ppf",
     "trailing_window_means",
-    "validate_block_sequence",
-    "validate_replicate_schedules",
     "validate_schedule",
 ]
