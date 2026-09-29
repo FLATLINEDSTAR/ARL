@@ -387,4 +387,3 @@ To audit or reproduce a historical experiment:
 2. **Verify Environment**: Compare Python and package versions against `packages`.
 3. **Replay Configuration**: Instantiate the experiment using the identical `config` payload and `config.seed`.
 4. **Verify Generated Weights**: Calculate SHA-256 of the resulting model weights and compare against the manifest's `artifacts.model.sha256`.
-
