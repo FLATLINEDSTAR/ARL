@@ -563,7 +563,7 @@ def benchmark_adaptation(
         help="Directory for Issue #265 JSON/CSV and training artifacts",
     ),
     study: Optional[str] = typer.Option(
-        None, "--study", help="Run the immutable full protocol study (currently prereg-v1)"
+        None, "--study", help="Run an immutable full protocol study (prereg-v1 or prereg-v2)"
     ),
     run_id: Optional[str] = typer.Option(
         None, "--run-id", help="Unique immutable output directory name required with --study"
@@ -640,12 +640,12 @@ def benchmark_adaptation(
 
         from adaptive_rl.benchmarking.adaptation_runner import run_adaptation_benchmark
 
-        if study not in {None, "prereg-v1"}:
-            raise ValueError("--study currently supports only prereg-v1")
+        if study not in {None, "prereg-v1", "prereg-v2"}:
+            raise ValueError("--study supports prereg-v1 or prereg-v2")
         if (study is None) != (run_id is None):
             raise ValueError("--study and --run-id must be supplied together")
         if resume and study is None:
-            raise ValueError("--resume requires --study prereg-v1 and --run-id")
+            raise ValueError("--resume requires a preregistered --study version and --run-id")
 
         artifact = run_adaptation_benchmark(
             exp_config,
@@ -654,6 +654,7 @@ def benchmark_adaptation(
             smoke=smoke,
             config_path=config,
             study_run_id=run_id if study is not None else None,
+            study_version=study or "prereg-v1",
             resume=resume,
         )
     except Exception as err:

@@ -333,6 +333,7 @@ def write_study_manifest(
     *,
     run_id: str,
     command: str,
+    study_version: str = "prereg-v1",
 ) -> dict[str, Any]:
     """Write an immutable provenance manifest for a completed study attempt."""
     artifact_path = Path(artifact_path)
@@ -363,7 +364,7 @@ def write_study_manifest(
             artifact_files.append(path)
     manifest = {
         "schema_version": STUDY_MANIFEST_SCHEMA_VERSION,
-        "study": "adaptive-vs-fixed/prereg-v1",
+        "study": f"adaptive-vs-fixed/{study_version}",
         "run_id": run_id,
         "commit_sha": commit,
         "working_tree_dirty": dirty,

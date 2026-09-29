@@ -84,7 +84,7 @@ def test_cli_adaptation_rejects_deterministic_ppo_before_creating_outputs(
     ("args", "message"),
     [
         (["--algorithm", "dqn"], "--algorithm must be 'ppo' or 'sac'"),
-        (["--resume"], "--resume requires --study prereg-v1 and --run-id"),
+        (["--resume"], "--resume requires a preregistered --study version and --run-id"),
         (
             ["--study", "prereg-v1", "--run-id", "hash-mismatch", "--stochastic"],
             "frozen Issue #271 configuration",

@@ -105,6 +105,7 @@ PLANNED_N: int = len(TRAINING_SEEDS)
 # These hashes are declared in docs/research/issue-271.md and require a new
 # study version if either scientific input changes.
 ISSUE271_CONFIG_SHA256: str = "0039c298b5048254b2d211cc66967e9d3e1d71275575fcfe28736485c65937b5"
+ISSUE271_V2_CONFIG_SHA256: str = "be12f2837dc0fbf00a752104e1649b3d5b41d852de2574f29a50a5d155dbafb8"
 ISSUE271_TREATMENT_CARD_SHA256: str = (
     "8383e736f02ff31393474b241b06d2dc92b036910c93c26081c1673c92a317e3"
 )
@@ -117,6 +118,7 @@ __all__ = [
     "CONFIG_TRAIN_POOL",
     "HORIZON",
     "ISSUE271_CONFIG_SHA256",
+    "ISSUE271_V2_CONFIG_SHA256",
     "ISSUE271_TREATMENT_CARD_SHA256",
     "K_PRE",
     "MIN_DEGRADATION_SE_MULTIPLIER",

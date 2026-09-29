@@ -1,0 +1,73 @@
+# Issue #265: primary moderate TEST-B condition. Training receives only the
+# nominal environment.parameters block. shift_parameters are held back until
+# after training and the shared pre-shift evaluation.
+name: "drone_online_adaptation"
+seed: 31001
+# Issue #105 / Issue #265: controlled distribution-shift benchmark for drone navigation.
+#
+# Protocol: the policy is trained ONLY on TRAIN conditions (8 static obstacles,
+# low wind) and then evaluated on TRAIN + TEST-A/B/C/D.
+# Train seeds [1000, 1015) and test seeds [2000, 2015) are strictly disjoint;
+# the shared test seed block enables paired comparison across TEST scenarios.
+#
+# Physical parameter scales (DroneDisturbed3DEnv, bounds 50x50x25 m):
+# - wind_speed: steady-wind magnitude in m/s (force = linear_damping * wind,
+#   linear_damping = 0.05; max_acceleration = 4.0 m/s^2).
+#   low = 0.5 m/s -> 0.025 m/s^2 bias; moderate = 4.0 m/s -> 0.2 m/s^2 bias.
+# - gust_sigma: OU gust volatility; stationary per-axis std = sigma/sqrt(2*theta).
+#   low = 0.15 -> 0.27 m/s per axis; moderate = 0.6 -> 1.10 m/s per axis.
+# - disturbance_strength: per-axis stationary std (m/s of equivalent wind) of the
+#   hidden injected OU disturbance (excluded from wind observations).
+#   high = 6.0 -> ~0.3 m/s^2 per-axis force std, typically unrecoverable drift.
+# - disturbance_event_factor = 1.5 (legacy derived threshold; superseded below),
+#   recovery_speed_tolerance = 1.0 m/s, recovery_hold_steps = 5
+# - recovery_event_threshold = 0.7 m/s FIXED for every scenario: one shared event
+#   definition (TRAIN-calibrated: ~8% of TRAIN gust steps exceed it), while only
+#   the disturbance distribution shifts. TEST regimes live outside this envelope
+#   most of the time, so their recovery signal appears chiefly in completion /
+#   censoring rates.
+
+algorithm:
+  name: "ppo"
+  learning_rate: 0.0003
+  gamma: 0.99
+  batch_size: 128
+  parameters:
+    n_steps: 1024
+    n_epochs: 10
+    clip_range: 0.2
+    ent_coef: 0.01
+
+environment:
+  name: "drone_disturbed"
+  max_steps: 300
+  parameters:
+    bounds: [50.0, 50.0, 25.0]
+    num_obstacles: 8
+    num_lidar_rays: 16
+    linear_damping: 0.05
+    max_acceleration: 4.0
+    wind_speed: 0.5
+    gust_sigma: 0.15
+    gust_theta: 0.15
+    wind_direction: [1.5, 0.5, 0.0]
+
+training:
+  total_timesteps: 60000
+  checkpoint_freq: 0
+  log_interval: 10
+
+evaluation:
+  eval_episodes: 15
+  deterministic: false
+
+adaptation_benchmark:
+  protocol_version: "2.0"
+  scenario: "TEST-B"
+  shift_parameters:
+    num_obstacles: 12
+    wind_speed: 4.0
+    gust_sigma: 0.6
+
+output_dir: "artifacts/adaptation"
+log_dir: "artifacts/adaptation/logs"

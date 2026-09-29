@@ -95,7 +95,9 @@ Execution status: **COMPLETE** for this one-cell, ten-replicate study. The
 preregistered six-cell family remains **INCONCLUSIVE** because five cells are
 not executable in this checkout. These data do not support H1.
 
-The intended single execution command is:
+The prereg-v1 command below is retained as historical provenance. The runner
+rejects it because its frozen deterministic PPO actions are invalid data for
+the native PPO update.
 
 ```bash
 .venv/bin/adaptive-rl benchmark adaptation \
@@ -125,9 +127,9 @@ run a machinery check with explicit stochastic collection, but that does not
 resolve the conflict with this study's deterministic-evaluation rule. The PPO
 treatment must not be described as scientifically validated until a prospective
 protocol amendment resolves the action-selection contract.
-This limitation does not change the previously recorded artifact or its
-descriptive statistics; its `COMPLETE` status describes harness execution, not
-valid on-policy PPO evidence.
+The recorded prereg-v1 artifact is retained for provenance, but its `COMPLETE`
+status describes harness execution only. Its PPO returns are not valid evidence
+for the preregistered Adaptive-vs-Fixed claim.
 
 * Run ID: `issue271-prereg-v1-20260929-01`
 * Run status: `COMPLETE`; 10 completed, 0 failed, ordered seeds 31001–31010.
@@ -185,3 +187,31 @@ claim is made.
 PR #266 and roadmap issues 4/5 remain unverified live because GitHub was not
 available. The run does not depend on them. This is a one-cell study, not
 evidence for the broader multi-environment claim.
+
+## Prospective amendment: prereg-v2
+
+Prereg-v1 froze deterministic PPO evaluation, which conflicts with the native
+PPO treatment's need for sampled behavior-policy actions. Prereg-v2 resolves
+the action-selection contract prospectively: all pre-shift and post-shift PPO
+episodes use stochastic policy actions, and those same sampled actions and
+behavior log-probabilities form the rollout used by adaptation. The study
+schedule, training budget, environment shifts, recovery endpoint, seed schedule,
+and statistical analysis remain unchanged. This amendment creates a new
+configuration identity; prereg-v1 artifacts and hashes remain untouched.
+
+Run prereg-v2 only with the amended config and a new run ID:
+
+```bash
+.venv/bin/adaptive-rl benchmark adaptation \
+  --config configs/drone_distribution_shift_prereg_v2.yaml \
+  --output-dir artifacts/issue271 \
+  --study prereg-v2 \
+  --run-id issue271-prereg-v2-YYYYMMDD-01
+```
+
+The v2 config sets `evaluation.deterministic: false` and has canonical
+SHA-256 `be12f2837dc0fbf00a752104e1649b3d5b41d852de2574f29a50a5d155dbafb8`.
+The runner verifies this hash before training, retains the common treatment-card
+hash, and stamps `adaptive-vs-fixed/prereg-v2` into both study manifests.
+Prereg-v1 remains available for verifying its prior immutable artifact but
+cannot start a new run because deterministic PPO collection is rejected.

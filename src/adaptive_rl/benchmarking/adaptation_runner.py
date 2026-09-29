@@ -49,6 +49,7 @@ from adaptive_rl.protocol.adaptation import (
 )
 from adaptive_rl.protocol.constants import (
     ISSUE271_CONFIG_SHA256,
+    ISSUE271_V2_CONFIG_SHA256,
     ISSUE271_TREATMENT_CARD_SHA256,
     K_PRE,
     N_POST,
@@ -693,6 +694,7 @@ def run_adaptation_benchmark(
     environment_factory: EnvironmentFactory = make_env,
     config_path: str | Path | None = None,
     study_run_id: str | None = None,
+    study_version: str = "prereg-v1",
     resume: bool = False,
 ) -> dict[str, Any]:
     """Run the selected preregistered replicates and write JSON/CSV artifacts.
@@ -731,12 +733,16 @@ def run_adaptation_benchmark(
     if smoke and len(selected_seeds) != 1:
         raise ValueError("smoke mode runs exactly one preregistered training seed")
     if study_run_id is not None:
+        if study_version not in {"prereg-v1", "prereg-v2"}:
+            raise ValueError(f"unsupported preregistration version: {study_version}")
         if not study_run_id or Path(study_run_id).name != study_run_id:
             raise ValueError("study_run_id must be a non-empty filename-safe component")
         if smoke or selected_seeds != list(TRAINING_SEEDS):
-            raise ValueError("prereg-v1 requires one non-smoke attempt of all ten seeds in order")
+            raise ValueError(
+                f"{study_version} requires one non-smoke attempt of all ten seeds in order"
+            )
         if output_dir is not None and Path(output_dir).is_absolute():
-            raise ValueError("prereg-v1 artifact output_dir must be relative to the repository")
+            raise ValueError(f"{study_version} artifact output_dir must be repository-relative")
         selected_output_dir = (
             Path(output_dir) if output_dir is not None else Path(config.output_dir)
         )
@@ -744,23 +750,29 @@ def run_adaptation_benchmark(
             selected_output_dir.resolve().relative_to(repository_root)
         except ValueError as exc:
             raise ValueError(
-                "prereg-v1 artifact output_dir must stay inside the repository"
+                f"{study_version} artifact output_dir must stay inside the repository"
             ) from exc
         if Path(config_arg).is_absolute():
-            raise ValueError("prereg-v1 config path must be repository-relative")
+            raise ValueError(f"{study_version} config path must be repository-relative")
         try:
             (repository_root / config_arg).resolve().relative_to(repository_root)
         except ValueError as exc:
-            raise ValueError("prereg-v1 config path must stay inside the repository") from exc
+            raise ValueError(f"{study_version} config path must stay inside the repository") from exc
         if config.algorithm.name.strip().lower() != "ppo":
-            raise ValueError("prereg-v1 is frozen to the drone_disturbed/ppo cell")
+            raise ValueError(f"{study_version} is frozen to the drone_disturbed/ppo cell")
         if config.environment.name != "drone_disturbed" or benchmark.scenario != "TEST-B":
-            raise ValueError("prereg-v1 is frozen to drone_disturbed under TEST-B")
-        if compute_config_sha256(config) != ISSUE271_CONFIG_SHA256:
-            raise ValueError("prereg-v1 config differs from the frozen Issue #271 configuration")
+            raise ValueError(f"{study_version} is frozen to drone_disturbed under TEST-B")
+        expected_config_hash = (
+            ISSUE271_CONFIG_SHA256 if study_version == "prereg-v1" else ISSUE271_V2_CONFIG_SHA256
+        )
+        if not expected_config_hash or compute_config_sha256(config) != expected_config_hash:
+            raise ValueError(f"{study_version} config differs from its frozen Issue #271 configuration")
         if card_sha != ISSUE271_TREATMENT_CARD_SHA256:
-            raise ValueError("prereg-v1 Treatment Card differs from the frozen treatment")
-    if config.algorithm.name.strip().lower() == "ppo" and config.evaluation.deterministic:
+            raise ValueError(f"{study_version} Treatment Card differs from the frozen treatment")
+    if (
+        config.algorithm.name.strip().lower() == "ppo"
+        and config.evaluation.deterministic
+    ):
         raise ValueError(
             "PPO adaptation requires stochastic behavior-policy action sampling; "
             "deterministic mean actions are not valid on-policy rollout data"
@@ -772,10 +784,10 @@ def run_adaptation_benchmark(
             ).strip()
         except (OSError, subprocess.CalledProcessError) as exc:
             raise RuntimeError(
-                "cannot verify clean working tree before prereg-v1 execution"
+                f"cannot verify clean working tree before {study_version} execution"
             ) from exc
         if dirty:
-            raise RuntimeError("prereg-v1 execution requires a clean, committed working tree")
+            raise RuntimeError(f"{study_version} execution requires a clean, committed working tree")
     determinism = _enable_study_determinism() if study_run_id is not None else None
 
     config_file = Path(config_path).resolve() if config_path is not None else None
@@ -792,7 +804,7 @@ def run_adaptation_benchmark(
     if study_run_id is not None:
         runtime_identity = _repository_metadata()
         study_inputs = {
-            "study": "adaptive-vs-fixed/prereg-v1",
+            "study": f"adaptive-vs-fixed/{study_version}",
             "artifact_schema_version": STUDY_ARTIFACT_SCHEMA_VERSION,
             "manifest_schema_version": STUDY_MANIFEST_SCHEMA_VERSION,
             "replicate_checkpoint_schema_version": REPLICATE_CHECKPOINT_SCHEMA_VERSION,
@@ -963,7 +975,7 @@ def run_adaptation_benchmark(
         "run_type": (
             "smoke"
             if smoke
-            else "prereg-v1"
+            else study_version
             if study_run_id is not None
             else "full_or_selected_research_run"
         ),
@@ -1037,7 +1049,7 @@ def run_adaptation_benchmark(
         command = (
             f"{executable_arg} benchmark adaptation "
             f"--config {config_arg} {output_arg}"
-            f"--study prereg-v1 --run-id {study_run_id}"
+            f"--study {study_version} --run-id {study_run_id}"
         )
         write_study_manifest(
             json_path,
@@ -1045,6 +1057,7 @@ def run_adaptation_benchmark(
             target_dir / "manifest.json",
             run_id=study_run_id,
             command=command,
+            study_version=study_version,
         )
         assert study_hash is not None
         return _read_completed_study_artifact(
