@@ -160,3 +160,44 @@ def test_build_density_experiment_figure() -> None:
     trace_names = [trace.name for trace in fig.data if hasattr(trace, "name")]
     assert "Success Rate (%)" in trace_names
     assert "Collision Rate (%)" in trace_names
+
+
+def test_build_distribution_shift_trajectory_figure() -> None:
+    """Verify 3D distribution shift trajectory figure creation."""
+    from adaptive_rl.gui.visualizer import build_distribution_shift_trajectory_figure
+
+    fixed_traj = [np.array([5.0, 5.0, 5.0]), np.array([10.0, 8.0, 6.0])]
+    adaptive_traj = [np.array([5.0, 5.0, 5.0]), np.array([12.0, 12.0, 8.0])]
+    fig = build_distribution_shift_trajectory_figure(
+        fixed_trajectory=fixed_traj,
+        adaptive_trajectory=adaptive_traj,
+        bounds=(50.0, 50.0, 25.0),
+        wind_vector=(4.0, 0.0, 0.0),
+    )
+    assert isinstance(fig, go.Figure)
+    names = [t.name for t in fig.data if hasattr(t, "name")]
+    assert any("Fixed Policy" in n for n in names)
+    assert any("Adaptive Policy" in n for n in names)
+
+
+def test_build_recovery_curve_figure() -> None:
+    """Verify recovery curve figure generation."""
+    from adaptive_rl.gui.visualizer import build_recovery_curve_figure
+
+    episodes = list(range(1, 16))
+    fixed_returns = [-50.0] * 15
+    adaptive_returns = [-50.0] * 5 + [-20.0, 0.0, 30.0, 60.0, 70.0, 80.0, 85.0, 88.0, 90.0, 92.0]
+    fig = build_recovery_curve_figure(
+        episodes=episodes,
+        fixed_returns=fixed_returns,
+        adaptive_returns=adaptive_returns,
+        p_pre=80.0,
+        p0=-50.0,
+        fixed_t_h=15,
+        adaptive_t_h=10,
+    )
+    assert isinstance(fig, go.Figure)
+    names = [t.name for t in fig.data if hasattr(t, "name")]
+    assert any("Fixed Arm" in n for n in names)
+    assert any("Adaptive Arm" in n for n in names)
+    assert any("90% Recovery Level" in n for n in names)

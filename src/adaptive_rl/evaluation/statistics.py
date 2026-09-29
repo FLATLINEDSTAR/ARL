@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import asdict, dataclass
+from numbers import Real
 from typing import Sequence
 
 
@@ -78,7 +79,12 @@ def _beta_continued_fraction(a: float, b: float, x: float) -> float:
 
 
 def _regularized_incomplete_beta(a: float, b: float, x: float) -> float:
-    if not 0.0 <= x <= 1.0:
+    if any(isinstance(value, bool) or not isinstance(value, Real) for value in (a, b, x)):
+        raise ValueError("Incomplete beta parameters must be real numbers.")
+    a, b, x = float(a), float(b), float(x)
+    if not math.isfinite(a) or not math.isfinite(b) or a <= 0.0 or b <= 0.0:
+        raise ValueError("Incomplete beta parameters a and b must be finite and positive.")
+    if not math.isfinite(x) or not 0.0 <= x <= 1.0:
         raise ValueError(f"Incomplete beta x must be in [0, 1], got {x}.")
     if x == 0.0:
         return 0.0
@@ -95,8 +101,15 @@ def _regularized_incomplete_beta(a: float, b: float, x: float) -> float:
 
 
 def _student_t_cdf(value: float, degrees_of_freedom: int) -> float:
+    if isinstance(degrees_of_freedom, bool) or not isinstance(degrees_of_freedom, int):
+        raise ValueError("Student-t degrees of freedom must be an integer.")
     if degrees_of_freedom <= 0:
         raise ValueError("Student-t degrees of freedom must be positive.")
+    if isinstance(value, bool) or not isinstance(value, Real):
+        raise ValueError("Student-t value must be a finite real number.")
+    value = float(value)
+    if not math.isfinite(value):
+        raise ValueError("Student-t value must be finite.")
     if value == 0.0:
         return 0.5
     x = degrees_of_freedom / (degrees_of_freedom + value * value)
@@ -111,8 +124,13 @@ def student_t_critical_value(confidence: float, degrees_of_freedom: int) -> floa
     using the regularized incomplete beta function; no statistical dependency
     or normal approximation is used.
     """
-    if not 0.0 < confidence < 1.0:
+    if isinstance(confidence, bool) or not isinstance(confidence, Real):
+        raise ValueError("Confidence must be a finite real number.")
+    confidence = float(confidence)
+    if not math.isfinite(confidence) or not 0.0 < confidence < 1.0:
         raise ValueError(f"Confidence must be between 0 and 1, got {confidence}.")
+    if isinstance(degrees_of_freedom, bool) or not isinstance(degrees_of_freedom, int):
+        raise ValueError("Student-t degrees of freedom must be an integer.")
     if degrees_of_freedom <= 0:
         raise ValueError("Student-t degrees of freedom must be positive.")
 
@@ -141,9 +159,12 @@ def summarize_seed_values(values: Sequence[float | None]) -> MetricStatistics:
     for value in values:
         if value is None:
             continue
-        if not math.isfinite(value):
+        if isinstance(value, bool) or not isinstance(value, Real):
+            raise ValueError(f"Metric values must be real numbers or None, got {value!r}.")
+        numeric_value = float(value)
+        if not math.isfinite(numeric_value):
             raise ValueError(f"Metric values must be finite, got {value!r}.")
-        observed.append(float(value))
+        observed.append(numeric_value)
 
     count = len(observed)
     if count == 0:
@@ -183,7 +204,7 @@ class DescriptiveMetrics:
 
 
 def _pooled_rate(flags: Sequence[bool | None]) -> float | None:
-    observed = [bool(flag) for flag in flags if flag is not None]
+    observed = [flag for flag in flags if flag is not None]
     if not observed:
         return None
     return float(sum(observed) / len(observed))
@@ -223,9 +244,27 @@ def summarize_descriptive_episodes(
 
     finite_rewards: list[float] = []
     for reward in rewards:
-        if not math.isfinite(reward):
+        if isinstance(reward, bool) or not isinstance(reward, Real):
+            raise ValueError(f"Episode rewards must be real numbers, got {reward!r}.")
+        numeric_reward = float(reward)
+        if not math.isfinite(numeric_reward):
             raise ValueError(f"Episode rewards must be finite, got {reward!r}.")
-        finite_rewards.append(float(reward))
+        finite_rewards.append(numeric_reward)
+
+    finite_lengths: list[float] = []
+    for length in episode_lengths:
+        if isinstance(length, bool) or not isinstance(length, Real):
+            raise ValueError(f"Episode lengths must be real numbers, got {length!r}.")
+        numeric_length = float(length)
+        if not math.isfinite(numeric_length) or numeric_length < 0.0:
+            raise ValueError(f"Episode lengths must be finite and non-negative, got {length!r}.")
+        finite_lengths.append(numeric_length)
+
+    for name, flags in (("successes", successes), ("collisions", collisions)):
+        if any(value is not None and not isinstance(value, bool) for value in flags):
+            raise ValueError(f"{name} values must be bool or None.")
+    if any(not isinstance(value, bool) for value in truncations):
+        raise ValueError("Truncation values must be bool.")
 
     mean_reward = math.fsum(finite_rewards) / episodes
     if episodes > 1:
@@ -236,12 +275,12 @@ def summarize_descriptive_episodes(
     else:
         std_reward = None
 
-    mean_episode_length = math.fsum(float(length) for length in episode_lengths) / episodes
+    mean_episode_length = math.fsum(finite_lengths) / episodes
     return DescriptiveMetrics(
         episodes=episodes,
         success_rate=_pooled_rate(successes),
         collision_rate=_pooled_rate(collisions),
-        timeout_rate=float(sum(bool(flag) for flag in truncations) / episodes),
+        timeout_rate=float(sum(truncations) / episodes),
         mean_reward=mean_reward,
         std_reward=std_reward,
         mean_episode_length=mean_episode_length,

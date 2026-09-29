@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, cast
+
+if TYPE_CHECKING:
+    from adaptive_rl.algorithms.base import BaseAlgorithm
 
 
 @dataclass
@@ -92,6 +96,7 @@ algorithm_registry = AlgorithmRegistry()
 
 def _register_defaults() -> None:
     from adaptive_rl.algorithms.ppo import PPOAlgorithm
+    from adaptive_rl.algorithms.sac import SACAlgorithm
 
     if "ppo" not in algorithm_registry.list_algorithms():
         algorithm_registry.register(
@@ -110,6 +115,27 @@ def _register_defaults() -> None:
                     "gamma": 0.99,
                 },
                 tags=["on-policy", "actor-critic", "sb3", "continuous"],
+            ),
+        )
+
+    if "sac" not in algorithm_registry.list_algorithms():
+        algorithm_registry.register(
+            "sac",
+            SACAlgorithm,
+            AlgorithmMetadata(
+                name="sac",
+                description="Soft Actor-Critic (SAC) backed by Stable-Baselines3.",
+                action_space="continuous",
+                trainable=True,
+                class_name="SACAlgorithm",
+                hyperparameters={
+                    "learning_rate": 3e-4,
+                    "buffer_size": 100000,
+                    "batch_size": 256,
+                    "gamma": 0.99,
+                    "tau": 0.005,
+                },
+                tags=["off-policy", "actor-critic", "sb3", "continuous"],
             ),
         )
 
@@ -141,6 +167,68 @@ def list_all_algorithm_metadata() -> Dict[str, AlgorithmMetadata]:
     return algorithm_registry.list_all_metadata()
 
 
+def load_algorithm_from_pretrained(
+    path: str | Path,
+    env: Optional[Any] = None,
+    algorithm_name: Optional[str] = None,
+) -> BaseAlgorithm:
+    """Load a trained algorithm instance from a saved model file.
+
+    Inspects algorithm_name or model archive metadata to instantiate either
+    PPOAlgorithm or SACAlgorithm (or registered custom algorithm).
+
+    Args:
+        path: Path to model checkpoint file (.zip).
+        env: Optional Gymnasium environment to bind to the model.
+        algorithm_name: Optional algorithm name hint ('ppo', 'sac').
+
+    Returns:
+        Loaded BaseAlgorithm instance.
+    """
+    model_path = Path(path)
+    if not model_path.exists() and model_path.with_suffix(".zip").exists():
+        model_path = model_path.with_suffix(".zip")
+
+    detected = algorithm_name.strip().lower() if algorithm_name else None
+    if detected is None and model_path.exists():
+        try:
+            import zipfile
+
+            with zipfile.ZipFile(model_path, "r") as z:
+                if "data" in z.namelist():
+                    data_str = z.read("data").decode("utf-8", errors="ignore")
+                    if '"SAC"' in data_str or "SACAlgorithm" in data_str:
+                        detected = "sac"
+                    elif '"PPO"' in data_str or "PPOAlgorithm" in data_str:
+                        detected = "ppo"
+        except Exception:
+            pass
+
+    if detected == "sac":
+        from adaptive_rl.algorithms.sac import SACAlgorithm
+
+        return SACAlgorithm.from_pretrained(model_path, env=env)
+    elif detected == "ppo":
+        from adaptive_rl.algorithms.ppo import PPOAlgorithm
+
+        return PPOAlgorithm.from_pretrained(model_path, env=env)
+    elif detected is not None and detected in algorithm_registry.list_algorithms():
+        factory = algorithm_registry.get_factory(detected)
+        if hasattr(factory, "from_pretrained"):
+            return cast("BaseAlgorithm", factory.from_pretrained(model_path, env=env))
+        return cast("BaseAlgorithm", factory(env=env))
+
+    # Fallback heuristic: try PPO first, then SAC
+    try:
+        from adaptive_rl.algorithms.ppo import PPOAlgorithm
+
+        return PPOAlgorithm.from_pretrained(model_path, env=env)
+    except Exception:
+        from adaptive_rl.algorithms.sac import SACAlgorithm
+
+        return SACAlgorithm.from_pretrained(model_path, env=env)
+
+
 __all__ = [
     "AlgorithmMetadata",
     "AlgorithmRegistry",
@@ -150,5 +238,6 @@ __all__ = [
     "get_algorithm_metadata",
     "list_algorithms",
     "list_all_algorithm_metadata",
+    "load_algorithm_from_pretrained",
     "register_algorithm",
 ]

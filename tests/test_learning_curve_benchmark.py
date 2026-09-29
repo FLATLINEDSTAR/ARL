@@ -53,7 +53,14 @@ CSV_FIELDNAMES = [
     "training_seed",
     "evaluation_seeds",
     "evaluation_episodes",
+    "evaluation_group_seed_count",
+    "episodes_per_seed",
+    "evaluation_split",
     "deterministic",
+    "algorithm",
+    "environment",
+    "environment_fingerprint",
+    "device",
 ]
 
 
@@ -207,6 +214,7 @@ benchmark:
     assert configured.benchmark.evaluation_seeds == [20, 21]
     assert configured.benchmark.evaluation_episodes == 3
     assert configured.benchmark.deterministic is False
+    assert configured.benchmark.evaluation_split == "custom"
 
 
 def test_core_and_benchmark_imports_do_not_load_optional_rl_stack() -> None:
@@ -380,7 +388,14 @@ def test_learning_curve_benchmark_execution_and_exports(
     assert data["benchmark"]["evaluation_episodes"] == 1
     assert data["benchmark"]["episodes_per_seed"] == 1
     assert data["benchmark"]["deterministic"] is True
+    assert data["benchmark"]["evaluation_split"] == "custom"
     assert data["benchmark"]["budgets"] == [64, 128]
+    assert data["provenance"]["adaptive_rl_version"]
+    assert data["provenance"]["python_version"]
+    assert set(data["provenance"]["packages"]) == {"torch", "stable-baselines3", "gymnasium"}
+    assert data["provenance"]["environment_configuration"]["training"]["name"] == "drone"
+    assert data["provenance"]["environment_configuration"]["evaluation"]["name"] == "drone"
+    assert len(data["provenance"]["environment_fingerprint_sha256"]) == 64
     assert "evaluation group seeds" in data["benchmark"]["seed_semantics"]
     assert len(data["results"]) == 2
     required_metrics = {
@@ -398,6 +413,9 @@ def test_learning_curve_benchmark_execution_and_exports(
         "per_seed_summaries",
         "cross_seed_statistics",
         "training_metadata",
+        "evaluation_split",
+        "environment_fingerprint",
+        "device",
     }
     for row in data["results"]:
         assert required_metrics <= row.keys()
@@ -449,6 +467,12 @@ def test_learning_curve_benchmark_execution_and_exports(
     assert all(row["training_seed"] == "17" for row in rows)
     assert all(row["evaluation_seeds"] == "11;12" for row in rows)
     assert all(row["evaluation_episodes"] == "1" for row in rows)
+    assert all(row["evaluation_group_seed_count"] == "2" for row in rows)
+    assert all(row["episodes_per_seed"] == "1" for row in rows)
+    assert all(row["evaluation_split"] == "custom" for row in rows)
+    assert all(row["algorithm"] == "ppo" for row in rows)
+    assert all(row["environment"] == "drone" for row in rows)
+    assert all(len(row["environment_fingerprint"]) == 64 for row in rows)
     assert all(row["deterministic"] == "True" for row in rows)
 
 
@@ -497,6 +521,53 @@ def test_learning_curve_benchmark_repeats_deterministically(tmp_path: Path) -> N
         assert getattr(first_point, field) == getattr(second_point, field)
 
 
+def test_test_split_benchmark_records_distribution_and_seed_provenance(tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    config.environment.parameters["split"] = "train"
+    assert config.benchmark is not None
+    config.benchmark.evaluation_seeds = [1001]
+    config.benchmark.evaluation_episodes = 1
+
+    result = run_learning_curve_benchmark(
+        config,
+        budgets=[64],
+        output_dir=tmp_path / "test_split",
+        evaluation_split="test",
+    )
+    document = json.loads(result.json_path.read_text(encoding="utf-8"))
+    assert result.evaluation_split == document["benchmark"]["evaluation_split"] == "test"
+    assert (
+        document["provenance"]["environment_configuration"]["training"]["parameters"]["split"]
+        == "train"
+    )
+    assert (
+        document["provenance"]["environment_configuration"]["evaluation"]["parameters"]["split"]
+        == "test"
+    )
+    episode_seed_mapping = document["benchmark"]["episode_reset_seed_mapping"]
+    assert "SHA-256" in episode_seed_mapping
+    assert result.points[0].per_seed_summaries[0]["seed"] == 1001
+    assert result.points[0].evaluation_split == "test"
+
+    with result.csv_path.open(newline="", encoding="utf-8") as handle:
+        row = next(csv.DictReader(handle))
+    assert row["evaluation_split"] == "test"
+
+
+def test_split_benchmark_requires_train_partition_for_policy_training(tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    assert config.benchmark is not None
+    config.benchmark.evaluation_seeds = [1001]
+    with pytest.raises(ValueError, match="split 'test' requires"):
+        run_learning_curve_benchmark(
+            config,
+            budgets=[64],
+            output_dir=tmp_path / "invalid_split",
+            evaluation_split="test",
+        )
+    assert not (tmp_path / "invalid_split").exists()
+
+
 def test_benchmark_keeps_single_episode_standard_deviation_unavailable(
     tmp_path: Path,
 ) -> None:
@@ -518,6 +589,59 @@ def test_benchmark_keeps_single_episode_standard_deviation_unavailable(
     with result.csv_path.open(newline="", encoding="utf-8") as handle:
         row = next(csv.DictReader(handle))
     assert row["std_reward"] == ""
+
+
+def test_json_manifest_replace_is_atomic_on_interruption(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import adaptive_rl.benchmarking.learning_curve as learning_curve
+
+    target = tmp_path / "learning_curve_budget.json"
+    previous_document = '{"previous": true}\n'
+    target.write_text(previous_document, encoding="utf-8")
+    result = _make_result(json_path=target)
+
+    def interrupted_replace(source: Path, destination: Path) -> None:
+        raise OSError("simulated interruption before atomic replace")
+
+    monkeypatch.setattr(learning_curve.os, "replace", interrupted_replace)
+    with pytest.raises(OSError, match="simulated interruption"):
+        learning_curve._write_json(result)
+
+    assert target.read_text(encoding="utf-8") == previous_document
+    assert list(tmp_path.glob(".learning_curve_budget.json.*.tmp")) == []
+
+
+def test_plot_failure_preserves_json_and_csv_benchmark_artifacts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import adaptive_rl.benchmarking.learning_curve as learning_curve
+
+    point = _make_point()
+    monkeypatch.setattr(
+        learning_curve,
+        "_run_single_budget",
+        lambda *args, **kwargs: point,
+    )
+    monkeypatch.setitem(sys.modules, "matplotlib", None)
+
+    result = run_learning_curve_benchmark(
+        _make_config(tmp_path),
+        budgets=[64],
+        output_dir=tmp_path / "plot_failure",
+        plot=True,
+    )
+
+    assert result.status == "completed"
+    assert result.plot_error is not None
+    assert result.json_path is not None and result.json_path.is_file()
+    assert result.csv_path is not None and result.csv_path.is_file()
+    document = json.loads(result.json_path.read_text(encoding="utf-8"))
+    assert document["status"] == "completed"
+    assert document["plot"]["error"] == result.plot_error
+    with result.csv_path.open(newline="", encoding="utf-8") as handle:
+        rows = list(csv.DictReader(handle))
+    assert len(rows) == 1
 
 
 def test_default_benchmark_evaluation_does_not_derive_seed_count_from_episode_count(
@@ -812,6 +936,7 @@ def test_benchmark_cli_dispatch_and_budget_validation(
         "--plot",
         "--no-plot",
         "--plot-x-axis",
+        "--evaluation-split",
     ):
         assert option in clean_budget_help
     dispatch: list[dict[str, Any]] = []
@@ -848,6 +973,8 @@ def test_benchmark_cli_dispatch_and_budget_validation(
             "11,12",
             "--episodes",
             "1",
+            "--evaluation-split",
+            "custom",
         ],
     )
     assert success.exit_code == 0, success.output
@@ -860,6 +987,7 @@ def test_benchmark_cli_dispatch_and_budget_validation(
     assert dispatch[0]["evaluation_seeds"] == [11, 12]
     assert dispatch[0]["evaluation_episodes"] == 1
     assert dispatch[0]["plot_x_axis"] == "trained"
+    assert dispatch[0]["evaluation_split"] == "custom"
 
     invalid_axis = runner.invoke(
         app,
@@ -875,6 +1003,21 @@ def test_benchmark_cli_dispatch_and_budget_validation(
     assert invalid_axis.exit_code == 1
     assert "Invalid --plot-x-axis" in invalid_axis.output
     assert "Traceback" not in invalid_axis.output
+    assert len(dispatch) == 1
+
+    invalid_split = runner.invoke(
+        app,
+        [
+            "benchmark",
+            "budgets",
+            "--config",
+            str(config_path),
+            "--evaluation-split",
+            "unseen",
+        ],
+    )
+    assert invalid_split.exit_code == 1
+    assert "Invalid --evaluation-split" in invalid_split.output
     assert len(dispatch) == 1
 
     for invalid in ("64,-1", "foo,128"):

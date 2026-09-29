@@ -26,6 +26,19 @@ def test_cli_help() -> None:
     assert "experiment-ablation" in result.output
     assert "config" in result.output
     assert "env" in result.output
+    assert "benchmark" in result.output
+
+
+def test_cli_benchmark_compare_algorithms_help() -> None:
+    """Verify adaptive-rl benchmark compare-algorithms --help displays options."""
+    result = runner.invoke(app, ["benchmark", "compare-algorithms", "--help"])
+    assert result.exit_code == 0
+    clean_output = re.sub(r"\x1b\[[0-9;]*[a-zA-Z]", "", result.output)
+    assert "--algorithms" in clean_output
+    assert "--timesteps" in clean_output
+    assert "--episodes" in clean_output
+    assert "--output-report" in clean_output
+    assert "--output-csv" in clean_output
 
 
 def test_cli_gui_help() -> None:
@@ -290,6 +303,28 @@ log_dir: "{tmp_path / "logs"}"
     assert eval_report.exists()
     assert eval_csv.exists()
 
+    # 2c. Evaluate with --compare-planner astar
+    eval_planner_res = runner.invoke(
+        app,
+        [
+            "evaluate",
+            "--config",
+            str(test_config),
+            "--model",
+            str(model_file),
+            "--episodes",
+            "1",
+            "--compare-planner",
+            "astar",
+        ],
+    )
+    assert eval_planner_res.exit_code == 0
+    assert "Benchmark Comparison" in eval_planner_res.output
+    assert "Classical Planner" in eval_planner_res.output
+    planner_artifact = Path("artifacts/evaluation_planner_comparison.json")
+    assert planner_artifact.exists()
+    planner_artifact.unlink()
+
     # 2b. Experiment-density command
     density_report = tmp_path / "density_test.json"
     dense_res = runner.invoke(
@@ -485,3 +520,170 @@ def test_cli_experiment_ablation_smoke(tmp_path: Path) -> None:
     assert "Reward-Function Ablation Benchmark Results" in res.output
     assert json_rep.exists()
     assert csv_rep.exists()
+
+
+def test_cli_evaluate_compare_planner_astar_success(tmp_path: Path) -> None:
+    """Verify CLI evaluate with --compare-planner astar succeeds, displays table, and creates artifact."""
+    test_config = tmp_path / "test_planner_cli.yaml"
+    test_config.write_text(
+        f"""
+name: "cli_planner_success_test"
+seed: 42
+algorithm:
+  name: "ppo"
+  learning_rate: 0.0003
+  gamma: 0.99
+  batch_size: 32
+  parameters:
+    n_steps: 64
+environment:
+  name: "drone"
+  max_steps: 15
+  parameters:
+    bounds: [20.0, 20.0, 10.0]
+    num_obstacles: 2
+training:
+  total_timesteps: 64
+  checkpoint_freq: 0
+  log_interval: 10
+evaluation:
+  eval_episodes: 1
+output_dir: "{tmp_path / "artifacts"}"
+log_dir: "{tmp_path / "logs"}"
+""",
+        encoding="utf-8",
+    )
+
+    train_res = runner.invoke(app, ["train", "--config", str(test_config), "--timesteps", "64"])
+    assert train_res.exit_code == 0
+    model_file = tmp_path / "artifacts" / "models" / "cli_planner_success_test_final.zip"
+    assert model_file.exists()
+
+    comparison_artifact = Path("artifacts/evaluation_planner_comparison.json")
+    if comparison_artifact.exists():
+        comparison_artifact.unlink()
+
+    try:
+        eval_res = runner.invoke(
+            app,
+            [
+                "evaluate",
+                "--config",
+                str(test_config),
+                "--model",
+                str(model_file),
+                "--episodes",
+                "1",
+                "--compare-planner",
+                "astar",
+            ],
+        )
+        assert eval_res.exit_code == 0
+        assert "Benchmark Comparison: PPO vs Classical Planner vs Random" in eval_res.output
+        assert "Classical" in eval_res.output
+        assert "Planner" in eval_res.output
+        assert "(A*)" in eval_res.output
+        assert "geometric path feasibility" in eval_res.output
+        assert comparison_artifact.exists()
+    finally:
+        if comparison_artifact.exists():
+            comparison_artifact.unlink()
+
+
+def test_cli_evaluate_unsupported_planner(tmp_path: Path) -> None:
+    """Verify CLI rejects unsupported classical planner names with exit code 1."""
+    config_path = Path(__file__).resolve().parent.parent / "configs" / "drone_ppo.yaml"
+    dummy_model = tmp_path / "dummy.zip"
+    dummy_model.touch()
+
+    res = runner.invoke(
+        app,
+        [
+            "evaluate",
+            "--config",
+            str(config_path),
+            "--model",
+            str(dummy_model),
+            "--compare-planner",
+            "unsupported_planner_name",
+        ],
+    )
+    assert res.exit_code == 1
+    assert "Unsupported planner" in res.output
+
+
+def test_cli_evaluate_planner_with_split(tmp_path: Path) -> None:
+    """Verify CLI evaluate supports --compare-planner combined with --split."""
+    test_config = tmp_path / "test_drone_cli.yaml"
+    test_config.write_text(
+        f"""
+name: "cli_planner_split_test"
+seed: 42
+algorithm:
+  name: "ppo"
+  learning_rate: 0.0003
+  gamma: 0.99
+  batch_size: 32
+  parameters:
+    n_steps: 64
+environment:
+  name: "drone"
+  max_steps: 10
+  parameters:
+    bounds: [20.0, 20.0, 10.0]
+    num_obstacles: 1
+training:
+  total_timesteps: 32
+  checkpoint_freq: 0
+  log_interval: 10
+evaluation:
+  eval_episodes: 1
+output_dir: "{tmp_path / "artifacts"}"
+log_dir: "{tmp_path / "logs"}"
+""",
+        encoding="utf-8",
+    )
+
+    train_res = runner.invoke(app, ["train", "--config", str(test_config), "--timesteps", "32"])
+    assert train_res.exit_code == 0
+    model_file = tmp_path / "artifacts" / "models" / "cli_planner_split_test_final.zip"
+    assert model_file.exists()
+
+    res = runner.invoke(
+        app,
+        [
+            "evaluate",
+            "--config",
+            str(test_config),
+            "--model",
+            str(model_file),
+            "--episodes",
+            "1",
+            "--split",
+            "test",
+            "--compare-planner",
+            "astar",
+        ],
+    )
+    assert res.exit_code == 0
+    assert "Benchmark Comparison" in res.output
+    assert "Classical Planner" in res.output
+
+
+def test_cli_benchmark_adaptation_help() -> None:
+    """Verify adaptive-rl benchmark adaptation --help displays options."""
+    result = runner.invoke(app, ["benchmark", "adaptation", "--help"])
+    assert result.exit_code == 0
+    clean_output = re.sub(r"\x1b\[[0-9;]*[a-zA-Z]", "", result.output)
+    assert "--seeds" in clean_output
+    assert "--timesteps" in clean_output
+    assert "--quick" in clean_output
+    assert "--output" in clean_output
+
+
+def test_cli_demo_help() -> None:
+    """Verify adaptive-rl demo --help displays options."""
+    result = runner.invoke(app, ["demo", "--help"])
+    assert result.exit_code == 0
+    clean_output = re.sub(r"\x1b\[[0-9;]*[a-zA-Z]", "", result.output)
+    assert "--seed" in clean_output

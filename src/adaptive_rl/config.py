@@ -9,7 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Literal, Optional
 
 import yaml
 from pydantic import (
@@ -122,6 +122,13 @@ class BenchmarkConfig(BaseModel):
     deterministic: bool = Field(
         True,
         description="Whether to evaluate using deterministic action selection for all budgets.",
+    )
+    evaluation_split: Literal["custom", "train", "test"] = Field(
+        "custom",
+        description=(
+            "Evaluation distribution: arbitrary derived seeds ('custom') or the configured "
+            "generalization protocol's train/test seed partition."
+        ),
     )
 
     @field_validator("budgets")

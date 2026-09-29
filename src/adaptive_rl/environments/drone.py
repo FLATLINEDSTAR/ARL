@@ -286,8 +286,26 @@ def compute_lidar_3d_readings(
     obstacles: List[ObstacleSphere3D],
     bounds: Tuple[float, float, float],
     max_range: float = 20.0,
+    noise_std: float = 0.0,
+    dropout_prob: float = 0.0,
+    min_range: float = 0.0,
+    rng: Optional[np.random.Generator] = None,
 ) -> np.ndarray:
-    """Compute normalized LiDAR range readings along 3D ray directions."""
+    """Compute normalized LiDAR range readings along 3D ray directions with optional noise/dropout.
+
+    Args:
+        origin: 3D point of sensor origin [x, y, z].
+        ray_directions: Array of normalized unit vectors for each beam.
+        obstacles: List of spherical obstacles.
+        bounds: Arena bounding box (X_max, Y_max, Z_max).
+        max_range: Maximum sensor detection range in meters.
+        noise_std: Standard deviation of zero-mean Gaussian measurement noise in meters.
+        dropout_prob: Probability in [0, 1] that an individual beam fails to return an echo.
+                      Dropped beams report max_range (normalized 1.0).
+        min_range: Minimum detectable distance in meters (blind zone). Distances below
+                   min_range are clamped to min_range.
+        rng: Optional seeded NumPy random generator for stochastic noise and dropout.
+    """
     orig = np.asarray(origin, dtype=np.float64)
     readings: List[float] = []
 
@@ -297,9 +315,25 @@ def compute_lidar_3d_readings(
             dist = ray_cast_sphere_3d(orig, ray_dir, obs.center, obs.radius, max_range=max_range)
             if dist < min_dist:
                 min_dist = dist
-        readings.append(min_dist / max_range)
 
-    return np.clip(readings, 0.0, 1.0).astype(np.float32)
+        # Apply stochastic sensor model if configured
+        if dropout_prob > 0.0 and rng is not None:
+            if float(rng.uniform(0.0, 1.0)) < dropout_prob:
+                readings.append(1.0)
+                continue
+
+        final_dist = min_dist
+        if noise_std > 0.0 and rng is not None:
+            noise = float(rng.normal(0.0, noise_std))
+            final_dist += noise
+
+        if min_range > 0.0:
+            final_dist = max(min_range, final_dist)
+
+        norm_reading = min(1.0, max(0.0, final_dist / max_range))
+        readings.append(norm_reading)
+
+    return np.asarray(readings, dtype=np.float32)
 
 
 def generate_drone_obstacles(
@@ -381,6 +415,9 @@ class DroneNavigation3DEnv(AdaptiveRLEnv[np.ndarray, np.ndarray]):
         collision_radius: float = 0.8,
         lidar_range: float = 20.0,
         num_lidar_rays: int = 16,
+        lidar_noise_std: float = 0.0,
+        lidar_dropout_prob: float = 0.0,
+        lidar_min_range: float = 0.0,
         dt: float = 0.1,
         max_velocity: float = 8.0,
         max_acceleration: float = 4.0,
@@ -421,6 +458,16 @@ class DroneNavigation3DEnv(AdaptiveRLEnv[np.ndarray, np.ndarray]):
             or np.linalg.norm(direction) == 0
         ):
             raise ValueError("wind_direction must be a finite, non-zero 3-vector")
+        if lidar_noise_std < 0.0:
+            raise ValueError(f"lidar_noise_std cannot be negative, got {lidar_noise_std}")
+        if not (0.0 <= lidar_dropout_prob <= 1.0):
+            raise ValueError(
+                f"lidar_dropout_prob must be between 0.0 and 1.0, got {lidar_dropout_prob}"
+            )
+        if not (0.0 <= lidar_min_range < lidar_range):
+            raise ValueError(
+                f"lidar_min_range must be >= 0.0 and < lidar_range ({lidar_range}), got {lidar_min_range}"
+            )
 
         self.split: Optional[str] = None
         if split is not None:
@@ -455,6 +502,9 @@ class DroneNavigation3DEnv(AdaptiveRLEnv[np.ndarray, np.ndarray]):
         self.collision_radius = float(collision_radius)
         self.lidar_range = float(lidar_range)
         self.num_lidar_rays = num_lidar_rays
+        self.lidar_noise_std = float(lidar_noise_std)
+        self.lidar_dropout_prob = float(lidar_dropout_prob)
+        self.lidar_min_range = float(lidar_min_range)
         self.max_steps = max_steps
         self.step_penalty = float(step_penalty)
         self.goal_reward = float(goal_reward)
@@ -523,6 +573,10 @@ class DroneNavigation3DEnv(AdaptiveRLEnv[np.ndarray, np.ndarray]):
             obstacles=self._obstacles,
             bounds=self.bounds,
             max_range=self.lidar_range,
+            noise_std=self.lidar_noise_std,
+            dropout_prob=self.lidar_dropout_prob,
+            min_range=self.lidar_min_range,
+            rng=self.np_random,
         )
 
         raw = np.concatenate([norm_pos, norm_vel, norm_goal, rel_goal, norm_dist, lidar_readings])
@@ -568,6 +622,9 @@ class DroneNavigation3DEnv(AdaptiveRLEnv[np.ndarray, np.ndarray]):
             "min_obstacle_distance": min_obs_dist if self._obstacles else float("inf"),
             "altitude": float(self._position[2]),
             "wind_velocity": self._wind_velocity(self._position).copy(),
+            "lidar_noise_std": self.lidar_noise_std,
+            "lidar_dropout_prob": self.lidar_dropout_prob,
+            "lidar_min_range": self.lidar_min_range,
         }
         current_split = self._active_split if self._active_split is not None else self.split
         if current_split is not None:
@@ -662,6 +719,24 @@ class DroneNavigation3DEnv(AdaptiveRLEnv[np.ndarray, np.ndarray]):
         num_obs = self.num_obstacles
         if options and "num_obstacles" in options:
             num_obs = options["num_obstacles"]
+
+        if options and "lidar_noise_std" in options:
+            n_std = float(options["lidar_noise_std"])
+            if n_std < 0.0:
+                raise ValueError(f"lidar_noise_std cannot be negative, got {n_std}")
+            self.lidar_noise_std = n_std
+        if options and "lidar_dropout_prob" in options:
+            d_prob = float(options["lidar_dropout_prob"])
+            if not (0.0 <= d_prob <= 1.0):
+                raise ValueError(f"lidar_dropout_prob must be between 0.0 and 1.0, got {d_prob}")
+            self.lidar_dropout_prob = d_prob
+        if options and "lidar_min_range" in options:
+            m_range = float(options["lidar_min_range"])
+            if not (0.0 <= m_range < self.lidar_range):
+                raise ValueError(
+                    f"lidar_min_range must be >= 0.0 and < lidar_range ({self.lidar_range}), got {m_range}"
+                )
+            self.lidar_min_range = m_range
 
         self._position = self.default_start.copy()
         self._velocity = np.zeros(3, dtype=np.float64)

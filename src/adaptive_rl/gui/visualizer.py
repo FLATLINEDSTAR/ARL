@@ -80,6 +80,8 @@ def build_arena_3d_figure(
     trajectory: Optional[Sequence[np.ndarray | Sequence[float]]] = None,
     current_pos: Optional[np.ndarray | Sequence[float]] = None,
     current_vel: Optional[np.ndarray | Sequence[float]] = None,
+    attitude_quaternion: Optional[Sequence[float]] = None,
+    wind_vector: Optional[Sequence[float]] = None,
     lidar_rays: Optional[np.ndarray] = None,
     lidar_ranges: Optional[Sequence[float] | np.ndarray] = None,
     show_lidar: bool = True,
@@ -266,6 +268,55 @@ def build_arena_3d_figure(
                 )
             )
 
+        # 6-DOF Rigid-body Attitude Coordinate Frame (Roll/Pitch/Yaw)
+        if attitude_quaternion is not None and len(attitude_quaternion) == 4:
+            qw, qx, qy, qz = [float(v) for v in attitude_quaternion]
+            rot_mat = np.array(
+                [
+                    [1 - 2 * (qy**2 + qz**2), 2 * (qx * qy - qz * qw), 2 * (qx * qz + qy * qw)],
+                    [2 * (qx * qy + qz * qw), 1 - 2 * (qx**2 + qz**2), 2 * (qy * qz - qx * qw)],
+                    [2 * (qx * qz - qy * qw), 2 * (qy * qz + qx * qw), 1 - 2 * (qx**2 + qy**2)],
+                ]
+            )
+            axis_len = 1.2
+            axes_colors = [
+                ("#ef4444", "Body X (Roll)"),
+                ("#22c55e", "Body Y (Pitch)"),
+                ("#3b82f6", "Body Z (Yaw)"),
+            ]
+            for idx, (col, ax_name) in enumerate(axes_colors):
+                vec = rot_mat[:, idx] * axis_len
+                fig.add_trace(
+                    go.Scatter3d(
+                        x=[current_pos[0], current_pos[0] + vec[0]],
+                        y=[current_pos[1], current_pos[1] + vec[1]],
+                        z=[current_pos[2], current_pos[2] + vec[2]],
+                        mode="lines",
+                        line=dict(color=col, width=4),
+                        name=ax_name,
+                        hoverinfo="name",
+                    )
+                )
+
+        # Environmental Wind Vector
+        if wind_vector is not None and float(np.linalg.norm(wind_vector)) > 0.05:
+            wx, wy, wz = [float(v) for v in wind_vector]
+            # Draw wind indicator near the top corner
+            w_origin = [bx * 0.1, by * 0.1, bz * 0.85]
+            w_scale = 0.5
+            fig.add_trace(
+                go.Scatter3d(
+                    x=[w_origin[0], w_origin[0] + wx * w_scale],
+                    y=[w_origin[1], w_origin[1] + wy * w_scale],
+                    z=[w_origin[2], w_origin[2] + wz * w_scale],
+                    mode="lines+markers",
+                    marker=dict(size=[0, 4], color="#38bdf8"),
+                    line=dict(color="#38bdf8", width=5),
+                    name=f"Ambient Wind ({np.linalg.norm(wind_vector):.1f} m/s)",
+                    hoverinfo="name",
+                )
+            )
+
     # Configure 3D Camera, Lighting, and Dark Flight Deck Styling
     fig.update_layout(
         template="plotly_dark",
@@ -354,6 +405,8 @@ def run_drone_simulation_episode(
             "action": np.zeros(3, dtype=np.float32),
             "collision": False,
             "is_success": False,
+            "quaternion": info.get("quaternion"),
+            "wind_vector": info.get("wind_vector"),
         }
     )
 
@@ -388,6 +441,8 @@ def run_drone_simulation_episode(
                 "action": np.asarray(action, dtype=np.float32).copy(),
                 "collision": bool(info.get("collision", False)),
                 "is_success": bool(info.get("is_success", False) or info.get("success", False)),
+                "quaternion": info.get("quaternion"),
+                "wind_vector": info.get("wind_vector"),
             }
         )
 
@@ -400,11 +455,15 @@ def run_drone_simulation_episode(
         "total_steps": step_count,
         "outcome": outcome,
         "seed": seed,
-        "obstacles": env._obstacles,
-        "target": env.target.copy(),
+        "obstacles": getattr(env, "_obstacles", getattr(env, "obstacles", [])),
+        "target": getattr(
+            env, "target", getattr(env, "_goal", getattr(env, "goal", np.zeros(3)))
+        ).copy(),
         "bounds": env.bounds,
-        "start_pos": env.default_start.copy(),
+        "start_pos": getattr(env, "default_start", getattr(env, "_start_pos", np.zeros(3))).copy(),
         "lidar_rays": env.lidar_rays,
+        "wind_vector": info.get("wind_vector"),
+        "quaternion": info.get("quaternion"),
     }
 
 
@@ -555,4 +614,175 @@ def build_density_experiment_figure(
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
         margin=dict(l=20, r=20, t=50, b=20),
     )
+    return fig
+
+
+def build_distribution_shift_trajectory_figure(
+    fixed_trajectory: Sequence[Sequence[float] | np.ndarray],
+    adaptive_trajectory: Sequence[Sequence[float] | np.ndarray],
+    bounds: Tuple[float, float, float] = (50.0, 50.0, 25.0),
+    obstacles: Optional[Sequence[ObstacleSphere3D]] = None,
+    start_pos: Optional[Sequence[float] | np.ndarray] = None,
+    target: Optional[Sequence[float] | np.ndarray] = None,
+    wind_vector: Optional[Sequence[float]] = None,
+    title: str = "Post-Shift Flight Comparison: Fixed Policy vs Adaptive Policy",
+) -> go.Figure:
+    """Build comparative 3D arena figure showing Fixed vs Adaptive trajectories under shift."""
+    fig = build_arena_3d_figure(
+        bounds=bounds,
+        obstacles=obstacles,
+        target=target,
+        start_pos=start_pos,
+        wind_vector=wind_vector,
+        show_lidar=False,
+        title=title,
+    )
+
+    # Fixed Policy Trajectory (Orange)
+    if fixed_trajectory and len(fixed_trajectory) > 1:
+        fx = [float(p[0]) for p in fixed_trajectory]
+        fy = [float(p[1]) for p in fixed_trajectory]
+        fz = [float(p[2]) for p in fixed_trajectory]
+        fig.add_trace(
+            go.Scatter3d(
+                x=fx,
+                y=fy,
+                z=fz,
+                mode="lines+markers",
+                marker=dict(size=2, color="#f97316"),
+                line=dict(color="#f97316", width=5, dash="dash"),
+                name="Fixed Policy (No Adaptation)",
+            )
+        )
+
+    # Adaptive Policy Trajectory (Cyan)
+    if adaptive_trajectory and len(adaptive_trajectory) > 1:
+        ax = [float(p[0]) for p in adaptive_trajectory]
+        ay = [float(p[1]) for p in adaptive_trajectory]
+        az = [float(p[2]) for p in adaptive_trajectory]
+        fig.add_trace(
+            go.Scatter3d(
+                x=ax,
+                y=ay,
+                z=az,
+                mode="lines+markers",
+                marker=dict(size=3, color="#06b6d4"),
+                line=dict(color="#06b6d4", width=5),
+                name="Adaptive Policy (Online PPO)",
+            )
+        )
+
+    return fig
+
+
+def build_recovery_curve_figure(
+    episodes: Sequence[int],
+    fixed_returns: Sequence[float],
+    adaptive_returns: Sequence[float],
+    p_pre: float,
+    p0: float,
+    fixed_t_h: Optional[int] = None,
+    adaptive_t_h: Optional[int] = None,
+    title: str = "Online Adaptation Recovery Dynamics (Protocol v2.0)",
+) -> go.Figure:
+    """Build recovery trajectory figure comparing Fixed vs Adaptive returns across post-shift episodes."""
+    fig = go.Figure()
+
+    eps = list(episodes)
+    degradation = p_pre - p0
+    threshold_val = p0 + 0.9 * degradation if degradation > 0 else p_pre
+
+    # Pre-shift baseline P_pre
+    fig.add_trace(
+        go.Scatter(
+            x=[min(eps), max(eps)],
+            y=[p_pre, p_pre],
+            mode="lines",
+            line=dict(color="#10b981", width=2, dash="dash"),
+            name=f"Nominal Baseline P_pre ({p_pre:.1f})",
+        )
+    )
+
+    # Initial Shock baseline P0
+    fig.add_trace(
+        go.Scatter(
+            x=[min(eps), max(eps)],
+            y=[p0, p0],
+            mode="lines",
+            line=dict(color="#ef4444", width=2, dash="dot"),
+            name=f"Shock Baseline P0 ({p0:.1f})",
+        )
+    )
+
+    # 90% Recovery Threshold
+    if degradation > 0:
+        fig.add_trace(
+            go.Scatter(
+                x=[min(eps), max(eps)],
+                y=[threshold_val, threshold_val],
+                mode="lines",
+                line=dict(color="#f59e0b", width=2, dash="dashdot"),
+                name=f"90% Recovery Level ({threshold_val:.1f})",
+            )
+        )
+
+    # Fixed Policy Returns
+    fig.add_trace(
+        go.Scatter(
+            x=eps,
+            y=list(fixed_returns),
+            mode="lines+markers",
+            marker=dict(size=7, color="#f97316"),
+            line=dict(color="#f97316", width=3, dash="dash"),
+            name="Fixed Arm (Frozen)",
+        )
+    )
+
+    # Adaptive Policy Returns
+    fig.add_trace(
+        go.Scatter(
+            x=eps,
+            y=list(adaptive_returns),
+            mode="lines+markers",
+            marker=dict(size=8, color="#06b6d4"),
+            line=dict(color="#06b6d4", width=4),
+            name="Adaptive Arm (Online PPO)",
+        )
+    )
+
+    # Highlight shock window (episodes 1-5)
+    fig.add_vrect(
+        x0=0.5,
+        x1=5.5,
+        fillcolor="#374151",
+        opacity=0.3,
+        layer="below",
+        line_width=0,
+        annotation_text="Shared Shock Window (Ep 1-5)",
+        annotation_position="top left",
+    )
+
+    # Annotate recovery points if available
+    if adaptive_t_h is not None and adaptive_t_h < 15:
+        idx = adaptive_t_h - 1
+        if 0 <= idx < len(adaptive_returns):
+            fig.add_annotation(
+                x=adaptive_t_h,
+                y=adaptive_returns[idx],
+                text=f"Adaptive Recovered (T_H={adaptive_t_h})",
+                showarrow=True,
+                arrowhead=2,
+                arrowcolor="#06b6d4",
+                font=dict(color="#06b6d4"),
+            )
+
+    fig.update_layout(
+        template="plotly_dark",
+        title=title,
+        xaxis=dict(title="Post-Shift Episode Index (k)", tickmode="linear", tick0=1, dtick=1),
+        yaxis=dict(title="Episodic Return"),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        margin=dict(l=20, r=20, t=50, b=20),
+    )
+
     return fig

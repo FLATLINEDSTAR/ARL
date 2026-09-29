@@ -9,9 +9,16 @@ artifacts. Evaluation and cross-seed statistics are delegated to
 
 from __future__ import annotations
 
+import copy
 import csv
+import hashlib
+import importlib.metadata
+import io
 import json
 import math
+import os
+import platform
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Sequence
@@ -49,7 +56,14 @@ CSV_FIELDNAMES: tuple[str, ...] = (
     "training_seed",
     "evaluation_seeds",
     "evaluation_episodes",
+    "evaluation_group_seed_count",
+    "episodes_per_seed",
+    "evaluation_split",
     "deterministic",
+    "algorithm",
+    "environment",
+    "environment_fingerprint",
+    "device",
 )
 
 
@@ -89,6 +103,88 @@ def _validate_strict_json_payload(payload: Any, path: str = "$") -> None:
             _validate_strict_json_payload(value, f"{path}[{index}]")
         return
     raise ValueError(f"Value at {path} is not JSON-serializable: {type(payload).__name__}.")
+
+
+def _stable_json_value(value: Any, path: str = "$") -> Any:
+    """Normalize configuration values without serializing unstable objects."""
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError(f"Non-finite configuration value at {path}: {value!r}.")
+        return value
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, (list, tuple)):
+        return [_stable_json_value(item, f"{path}[{index}]") for index, item in enumerate(value)]
+    if isinstance(value, dict):
+        normalized: dict[str, Any] = {}
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise ValueError(f"Configuration keys must be strings at {path}: {key!r}.")
+            normalized[key] = _stable_json_value(item, f"{path}.{key}")
+        return normalized
+    raise ValueError(
+        f"Unsupported configuration value at {path}: {type(value).__name__}; "
+        "use JSON-compatible values."
+    )
+
+
+def _environment_configuration(
+    config: ExperimentConfig, evaluation_split: str
+) -> tuple[dict[str, Any], str]:
+    training = _stable_json_value(
+        config.environment.model_dump(mode="python"), "$.environment.training"
+    )
+    evaluation = copy.deepcopy(training)
+    evaluation_parameters = evaluation["parameters"]
+    if evaluation_split == "custom":
+        evaluation_parameters.pop("split", None)
+    else:
+        evaluation_parameters["split"] = evaluation_split
+    normalized = {"training": training, "evaluation": evaluation}
+    canonical = json.dumps(normalized, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    return normalized, hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _runtime_provenance() -> dict[str, Any]:
+    """Record stable runtime/version information without importing optional packages."""
+    import adaptive_rl
+
+    packages: dict[str, str | None] = {}
+    for distribution in ("torch", "stable-baselines3", "gymnasium"):
+        try:
+            packages[distribution] = importlib.metadata.version(distribution)
+        except importlib.metadata.PackageNotFoundError:
+            packages[distribution] = None
+    return {
+        "adaptive_rl_version": adaptive_rl.__version__,
+        "python_version": platform.python_version(),
+        "packages": packages,
+    }
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Write and sync a sibling temporary file before atomically replacing path."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+    )
+    temporary_path = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_path, path)
+        directory_descriptor = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_descriptor)
+        finally:
+            os.close(directory_descriptor)
+    finally:
+        if temporary_path.exists():
+            temporary_path.unlink()
 
 
 def validate_budgets(
@@ -181,6 +277,9 @@ class LearningCurvePoint:
     deterministic: bool
     algorithm: str
     environment: str
+    evaluation_split: str = "custom"
+    environment_fingerprint: str = ""
+    device: str = "unknown"
     per_seed_summaries: list[dict[str, int | float | None]] = field(default_factory=list)
     cross_seed_statistics: dict[str, dict[str, float | int | None]] = field(default_factory=dict)
 
@@ -226,6 +325,9 @@ class LearningCurvePoint:
             "deterministic": self.deterministic,
             "evaluation_group_seeds": list(self.evaluation_seeds),
             "episodes_per_seed": self.evaluation_episodes,
+            "evaluation_split": self.evaluation_split,
+            "environment_fingerprint": self.environment_fingerprint,
+            "device": self.device,
         }
 
 
@@ -249,6 +351,10 @@ class LearningCurveBenchmarkResult:
     evaluation_seeds: list[int]
     evaluation_episodes: int
     deterministic: bool
+    evaluation_split: str = "custom"
+    environment_configuration: dict[str, Any] = field(default_factory=dict)
+    environment_fingerprint: str = ""
+    provenance: dict[str, Any] = field(default_factory=dict)
     points: list[LearningCurvePoint] = field(default_factory=list)
     plot_data: dict[str, list[float | int | None]] = field(default_factory=dict)
     output_dir: Path | None = None
@@ -281,6 +387,7 @@ class LearningCurveBenchmarkResult:
                 "evaluation_group_seeds": list(self.evaluation_seeds),
                 "evaluation_episodes": self.evaluation_episodes,
                 "episodes_per_seed": self.evaluation_episodes,
+                "evaluation_split": self.evaluation_split,
                 "deterministic": self.deterministic,
                 "budgets": self.budgets,
                 "seed_semantics": (
@@ -311,6 +418,17 @@ class LearningCurveBenchmarkResult:
                     "monotonic elapsed time inside PPOAlgorithm.train() only; excludes model "
                     "serialization, metadata writing, evaluation, and artifact export"
                 ),
+                "episode_reset_seed_mapping": (
+                    "custom: injective Cantor pairing "
+                    "((group_seed + episode_index) * (group_seed + episode_index + 1)) // 2 "
+                    "+ episode_index; configured train/test split: SHA-256 mapping reduced "
+                    "into the finite split interval (sampling with replacement is possible)"
+                ),
+            },
+            "provenance": {
+                **self.provenance,
+                "environment_configuration": self.environment_configuration,
+                "environment_fingerprint_sha256": self.environment_fingerprint,
             },
             "results": [
                 {
@@ -328,8 +446,11 @@ class LearningCurveBenchmarkResult:
                     "evaluation_seeds": point.evaluation_seeds,
                     "evaluation_episodes": point.evaluation_episodes,
                     "deterministic": point.deterministic,
+                    "evaluation_split": point.evaluation_split,
                     "algorithm": point.algorithm,
                     "environment": point.environment,
+                    "environment_fingerprint": point.environment_fingerprint,
+                    "device": point.device,
                     "descriptive_metrics": point.descriptive_metrics,
                     "per_seed_summaries": point.per_seed_summaries,
                     "cross_seed_statistics": point.cross_seed_statistics,
@@ -396,6 +517,7 @@ def _evaluate_model(
     evaluation_seeds: Sequence[int],
     evaluation_episodes: int,
     deterministic: bool,
+    evaluation_split: str,
 ) -> tuple[
     DescriptiveMetrics,
     list[dict[str, Any]],
@@ -415,6 +537,7 @@ def _evaluate_model(
             seeds=evaluation_seeds,
             episodes_per_seed=evaluation_episodes,
             deterministic=deterministic,
+            split=None if evaluation_split == "custom" else evaluation_split,
         )
         records = evaluation.episodes
         if not records:
@@ -444,6 +567,8 @@ def _run_single_budget(
     evaluation_episodes: int,
     deterministic: bool,
     output_base_dir: Path,
+    evaluation_split: str,
+    environment_fingerprint: str,
 ) -> LearningCurvePoint:
     """Run a single budget as a fresh training process from the same base configuration."""
     benchmark_dir = _budget_dir(output_base_dir, budget)
@@ -466,6 +591,10 @@ def _run_single_budget(
         result = trainer.fit()
         training_time_seconds = float(result.training_time_seconds)
         trained_timesteps = int(trainer.algorithm.num_timesteps)
+        model = getattr(trainer.algorithm, "model", None)
+        device = str(
+            getattr(model, "device", config_copy.algorithm.parameters.get("device", "auto"))
+        )
     finally:
         if trainer is not None:
             trainer.close()
@@ -482,13 +611,19 @@ def _run_single_budget(
             f"Invalid training duration for budget {budget}: {training_time_seconds}"
         )
 
+    evaluation_env_kwargs = dict(config_copy.environment.parameters)
+    if evaluation_split == "custom":
+        evaluation_env_kwargs.pop("split", None)
+    else:
+        evaluation_env_kwargs["split"] = evaluation_split
     descriptive, per_seed_summaries, cross_seed_statistics = _evaluate_model(
         model_path,
         env_name=config_copy.environment.name,
-        env_kwargs=config_copy.environment.parameters,
+        env_kwargs=evaluation_env_kwargs,
         evaluation_seeds=evaluation_seeds,
         evaluation_episodes=evaluation_episodes,
         deterministic=deterministic,
+        evaluation_split=evaluation_split,
     )
 
     return LearningCurvePoint(
@@ -508,6 +643,9 @@ def _run_single_budget(
         deterministic=deterministic,
         algorithm=config_copy.algorithm.name,
         environment=config_copy.environment.name,
+        evaluation_split=evaluation_split,
+        environment_fingerprint=environment_fingerprint,
+        device=device,
         per_seed_summaries=per_seed_summaries,
         cross_seed_statistics=cross_seed_statistics,
     )
@@ -519,8 +657,8 @@ def _write_json(result: LearningCurveBenchmarkResult) -> None:
         raise ValueError("A JSON output path is required to serialize the benchmark.")
     result.json_path.parent.mkdir(parents=True, exist_ok=True)
     payload = result.to_dict()
-    with result.json_path.open("w", encoding="utf-8") as handle:
-        json.dump(payload, handle, indent=2, allow_nan=False)
+    serialized = json.dumps(payload, indent=2, allow_nan=False) + "\n"
+    _atomic_write_text(result.json_path, serialized)
 
 
 def _csv_row(point: LearningCurvePoint) -> dict[str, str | float | int | None]:
@@ -539,7 +677,14 @@ def _csv_row(point: LearningCurvePoint) -> dict[str, str | float | int | None]:
         "training_seed": point.training_seed,
         "evaluation_seeds": ";".join(str(seed) for seed in point.evaluation_seeds),
         "evaluation_episodes": point.evaluation_episodes,
+        "evaluation_group_seed_count": len(point.evaluation_seeds),
+        "episodes_per_seed": point.evaluation_episodes,
+        "evaluation_split": point.evaluation_split,
         "deterministic": str(bool(point.deterministic)),
+        "algorithm": point.algorithm,
+        "environment": point.environment,
+        "environment_fingerprint": point.environment_fingerprint,
+        "device": point.device,
     }
 
 
@@ -548,11 +693,12 @@ def _write_csv(result: LearningCurveBenchmarkResult) -> None:
     if result.csv_path is None:
         raise ValueError("A CSV output path is required to serialize the benchmark.")
     result.csv_path.parent.mkdir(parents=True, exist_ok=True)
-    with result.csv_path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=CSV_FIELDNAMES)
-        writer.writeheader()
-        for point in result.points:
-            writer.writerow(_csv_row(point))
+    output = io.StringIO(newline="")
+    writer = csv.DictWriter(output, fieldnames=CSV_FIELDNAMES)
+    writer.writeheader()
+    for point in result.points:
+        writer.writerow(_csv_row(point))
+    _atomic_write_text(result.csv_path, output.getvalue())
 
 
 def run_learning_curve_benchmark(
@@ -566,6 +712,7 @@ def run_learning_curve_benchmark(
     output_dir: str | Path | None = None,
     plot: bool = False,
     plot_x_axis: Literal["trained", "requested"] = "trained",
+    evaluation_split: Literal["custom", "train", "test"] | None = None,
 ) -> LearningCurveBenchmarkResult:
     """Run the PPO learning-curve benchmark across training budgets.
 
@@ -598,6 +745,23 @@ def run_learning_curve_benchmark(
 
     benchmark_cfg = _resolve_benchmark_config(config, None)
     normalized = validate_budgets(benchmark_cfg.budgets if budgets is None else budgets)
+    final_evaluation_split = (
+        benchmark_cfg.evaluation_split if evaluation_split is None else evaluation_split
+    )
+    if final_evaluation_split not in ("custom", "train", "test"):
+        raise ValueError("evaluation_split must be one of 'custom', 'train', or 'test'.")
+
+    training_split = config.environment.parameters.get("split")
+    if training_split == "test":
+        raise ValueError(
+            "The training environment cannot use the held-out 'test' split. "
+            "Use environment.parameters.split: train for split-based training."
+        )
+    if final_evaluation_split in ("train", "test") and training_split != "train":
+        raise ValueError(
+            f"Evaluation split '{final_evaluation_split}' requires "
+            "environment.parameters.split: train so test layouts remain held out."
+        )
 
     if training_seed is not None:
         final_training_seed = training_seed
@@ -622,6 +786,11 @@ def run_learning_curve_benchmark(
         raise ValueError("Evaluation seeds must be non-negative.")
     if len(set(final_eval_seeds)) != len(final_eval_seeds):
         raise ValueError("Evaluation seeds must not contain duplicates.")
+    if final_evaluation_split in ("train", "test"):
+        from adaptive_rl.evaluation.generalization import validate_split_seed
+
+        for seed in final_eval_seeds:
+            validate_split_seed(seed, final_evaluation_split)
 
     final_eval_episodes = (
         benchmark_cfg.evaluation_episodes if evaluation_episodes is None else evaluation_episodes
@@ -647,6 +816,10 @@ def run_learning_curve_benchmark(
         target_dir = Path(output_dir)
 
     target_dir.mkdir(parents=True, exist_ok=True)
+    environment_configuration, environment_fingerprint = _environment_configuration(
+        config, final_evaluation_split
+    )
+    runtime_provenance = _runtime_provenance()
     json_path = target_dir / "learning_curve_budget.json"
     csv_path = target_dir / "learning_curve_budget.csv"
     plot_path = target_dir / "learning_curve_budget.png" if plot else None
@@ -666,6 +839,8 @@ def run_learning_curve_benchmark(
                     evaluation_episodes=final_eval_episodes,
                     deterministic=final_deterministic,
                     output_base_dir=target_dir,
+                    evaluation_split=final_evaluation_split,
+                    environment_fingerprint=environment_fingerprint,
                 )
             )
         except Exception as exc:
@@ -683,6 +858,10 @@ def run_learning_curve_benchmark(
         evaluation_seeds=list(final_eval_seeds),
         evaluation_episodes=final_eval_episodes,
         deterministic=final_deterministic,
+        evaluation_split=final_evaluation_split,
+        environment_configuration=environment_configuration,
+        environment_fingerprint=environment_fingerprint,
+        provenance=runtime_provenance,
         points=bench_points,
         plot_data={
             "budgets": [int(point.budget_timesteps) for point in bench_points],
