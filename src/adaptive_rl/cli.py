@@ -47,11 +47,39 @@ env_app = typer.Typer(
 )
 app.add_typer(env_app, name="env")
 
+experiment_app = typer.Typer(
+    name="experiment",
+    help="Immutable experiment package validation commands.",
+    no_args_is_help=True,
+)
+app.add_typer(experiment_app, name="experiment")
+
 console = Console()
 
 
 def _format_metric(value: float | None) -> str:
     return f"{value:.3f}" if value is not None else "N/A"
+
+
+@experiment_app.command(name="validate")
+def validate_experiment(
+    package_dir: Path = typer.Argument(..., help="Immutable study result package directory"),
+    certificate: Optional[Path] = typer.Option(
+        None, "--certificate", help="Write validation report outside the package (must not exist)"
+    ),
+) -> None:
+    """Validate package integrity and preregistered claim eligibility."""
+    from adaptive_rl.experiments.validator import validate_result_package
+
+    report = validate_result_package(package_dir, certificate_path=certificate)
+    for check in report["checks"]:
+        color = "green" if check["status"] == "PASS" else "red"
+        console.print(f"[{color}]{check['status']}[/{color}] {check['id']}: {check['message']}")
+    console.print(
+        f"[bold {'green' if report['verdict'] == 'PASS' else 'red'}]Verdict: {report['verdict']}[/bold {'green' if report['verdict'] == 'PASS' else 'red'}]"
+    )
+    if report["verdict"] != "PASS":
+        raise typer.Exit(code=1)
 
 
 @app.command()
