@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import math
 from dataclasses import dataclass, replace
@@ -18,6 +19,7 @@ from adaptive_rl.environments.drone import DroneNavigation3DEnv
 from adaptive_rl.environments.registry import make_env
 from adaptive_rl.evaluation.metrics import (
     EvaluationMetrics,
+    PlannerEvaluationMetrics,
     StandardizedExperimentMetrics,
     compute_trajectory_metrics,
 )
@@ -27,6 +29,61 @@ from adaptive_rl.protocol.seed_schedule import (
     ScheduleValidationError,
     derive_seed,
 )
+
+
+def derive_episode_reset_seed(
+    evaluation_group_seed: int,
+    episode_index: int,
+    *,
+    split: Optional[str] = None,
+) -> int:
+    """Derive a stable reset seed from a seed group and episode index.
+
+    For custom distributions, Cantor pairing maps every non-negative integer
+    pair injectively to a non-negative integer:
+    ``((g + i) * (g + i + 1)) // 2 + i``. It is independent of the requested
+    episode count and does not use Python's randomized ``hash``.
+
+    Configured train/test splits have finite seed namespaces, so a SHA-256
+    digest is reduced into that split's documented interval. Sampling with
+    replacement is possible in these finite partitions and is identified in
+    the benchmark metadata.
+    """
+    if isinstance(evaluation_group_seed, bool) or not isinstance(evaluation_group_seed, int):
+        raise ValueError("Evaluation group seed must be an integer.")
+    if evaluation_group_seed < 0:
+        raise ValueError("Evaluation group seed must be non-negative.")
+    if isinstance(episode_index, bool) or not isinstance(episode_index, int):
+        raise ValueError("Episode index must be an integer.")
+    if episode_index < 0:
+        raise ValueError("Episode index must be non-negative.")
+
+    if split is None:
+        total = evaluation_group_seed + episode_index
+        return total * (total + 1) // 2 + episode_index
+
+    from adaptive_rl.evaluation.generalization import (
+        TEST_SEED_END,
+        TEST_SEED_START,
+        TRAIN_SEED_END,
+        TRAIN_SEED_START,
+        validate_split_seed,
+    )
+
+    clean_split = split.strip().lower()
+    if clean_split == "train":
+        start, end = TRAIN_SEED_START, TRAIN_SEED_END
+    elif clean_split == "test":
+        start, end = TEST_SEED_START, TEST_SEED_END
+    else:
+        raise ValueError(f"Unknown evaluation split {split!r}.")
+    validate_split_seed(evaluation_group_seed, clean_split)
+    capacity = end - start
+    payload = (
+        f"adaptive-rl-evaluation-reset-v1:{clean_split}:{evaluation_group_seed}:{episode_index}"
+    )
+    digest = hashlib.sha256(payload.encode("ascii")).digest()
+    return start + int.from_bytes(digest[:8], "big") % capacity
 
 
 @dataclass(frozen=True)
@@ -177,6 +234,13 @@ class MultiSeedEvaluationResult:
                 "seed_semantics": (
                     "seeds are evaluation group seeds (the statistical grouping unit); "
                     "episodes within a group use derived episode_reset_seed values"
+                ),
+                "episode_reset_seed_mapping": (
+                    "custom: Cantor pairing ((group_seed + episode_index) * "
+                    "(group_seed + episode_index + 1)) // 2 + episode_index; "
+                    "configured split: SHA-256 of "
+                    "'adaptive-rl-evaluation-reset-v1:<split>:<group_seed>:<episode_index>' "
+                    "reduced into the finite split interval"
                 ),
                 "episodes_per_seed": self.episodes_per_seed,
                 "total_episodes": self.total_episodes,
@@ -576,14 +640,15 @@ class Evaluator:
         seeds: Sequence[int],
         episodes_per_seed: int,
         deterministic: bool = True,
+        split: Optional[str] = None,
     ) -> MultiSeedEvaluationResult:
         """Evaluate a policy independently for each explicit seed group.
 
         ``seeds`` are evaluation group seeds: the statistical grouping unit
         for cross-seed summaries. Each group runs ``episodes_per_seed``
-        episodes whose actual ``env.reset`` seeds are the disjoint block
-        ``seed * episodes_per_seed + episode_index``; both values are recorded
-        per episode as ``evaluation_group_seed`` and ``episode_reset_seed``.
+        episodes whose actual ``env.reset`` seeds are derived independently of
+        ``episodes_per_seed``. Custom seeds use injective Cantor pairing;
+        configured finite splits use a split-bounded SHA-256 mapping.
 
         Duplicate seeds are rejected because repeated entries do not represent
         independent test conditions and would over-weight that environment.
@@ -607,14 +672,24 @@ class Evaluator:
         all_records: list[EpisodeEvaluationRecord] = []
         seed_summaries: list[SeedEvaluationSummary] = []
         for seed in seed_values:
-            episode_seed_base = seed * episodes_per_seed
+            reset_seeds = [
+                derive_episode_reset_seed(seed, index, split=split)
+                for index in range(episodes_per_seed)
+            ]
             metrics = self.evaluate(
                 num_episodes=episodes_per_seed,
                 deterministic=deterministic,
-                base_seed=episode_seed_base,
+                seeds=reset_seeds,
+                split=split,
             )
             records = [
-                replace(record, seed=seed, evaluation_group_seed=seed, episode_index=index)
+                replace(
+                    record,
+                    seed=seed,
+                    evaluation_group_seed=seed,
+                    episode_seed=reset_seeds[index],
+                    episode_index=index,
+                )
                 for index, record in enumerate(self.last_episode_records)
             ]
             all_records.extend(records)
@@ -862,14 +937,19 @@ def evaluate_ppo_policy(
 
 
 def compare_policies(
-    ppo_algorithm: BaseAlgorithm,
+    ppo_algorithm: Optional[BaseAlgorithm] = None,
     random_policy: Optional[BaseAlgorithm] = None,
     env: Optional[gym.Env] = None,
     num_episodes: int = 20,
     base_seed: Optional[int] = 42,
     split: Optional[str] = None,
+    algorithm: Optional[BaseAlgorithm] = None,
 ) -> Dict[str, EvaluationMetrics]:
-    """Execute head-to-head evaluation between trained PPO and Random baseline under identical seeds."""
+    """Execute head-to-head evaluation between trained policy and Random baseline under identical seeds."""
+    target_algo = algorithm if algorithm is not None else ppo_algorithm
+    if target_algo is None:
+        raise ValueError("Must provide either algorithm or ppo_algorithm.")
+
     close_env = False
     if env is None:
         env = DroneNavigation3DEnv()
@@ -878,8 +958,12 @@ def compare_policies(
         if random_policy is None:
             random_policy = RandomPolicy(action_space=env.action_space, seed=base_seed)
 
-        ppo_eval = Evaluator(algorithm=ppo_algorithm, env=env)
-        ppo_metrics = ppo_eval.evaluate(
+        from adaptive_rl.algorithms.sac import SACAlgorithm
+
+        algo_name = "SAC" if isinstance(target_algo, SACAlgorithm) else "PPO"
+
+        target_eval = Evaluator(algorithm=target_algo, env=env)
+        target_metrics = target_eval.evaluate(
             num_episodes=num_episodes,
             deterministic=True,
             base_seed=base_seed if split is None else None,
@@ -895,9 +979,418 @@ def compare_policies(
         )
 
         return {
-            "PPO": ppo_metrics,
+            algo_name: target_metrics,
             "Random Policy": rand_metrics,
         }
+    finally:
+        if close_env:
+            env.close()
+
+
+def evaluate_planner(
+    planner: Optional[Any] = None,
+    env: Optional[gym.Env] = None,
+    num_episodes: int = 20,
+    base_seed: Optional[int] = 42,
+    split: Optional[str] = None,
+) -> PlannerEvaluationMetrics:
+    """Benchmark AStar3DPlanner on procedural drone navigation environments.
+
+    Evaluates the classical 3D A* planner using the exact same procedural
+    environment seeds as RL policies. For each seed, start, goal, bounds,
+    and obstacles are extracted and passed to the planner.
+
+    Planning time (ms) measures the complete end-to-end wall-clock duration of
+    the planning query (input validation, obstacle clearance, A* graph search,
+    and path reconstruction).
+
+    Parameters
+    ----------
+    planner: Optional[AStar3DPlanner]
+        Motion planner instance. If None, instantiates AStar3DPlanner with defaults.
+    env: Optional[gym.Env]
+        Drone navigation environment. If None, instantiates a default DroneNavigation3DEnv.
+    num_episodes: int
+        Number of evaluation benchmark episodes.
+    base_seed: Optional[int]
+        Base seed for procedural environment generation.
+    split: Optional[str]
+        Environment dataset split ('train' or 'test'). When set, procedural seeds
+        are drawn from the standardized split range.
+
+    Returns
+    -------
+    PlannerEvaluationMetrics
+        Aggregated benchmark metrics including success rate, collision rate,
+        mean planning time in milliseconds, path length, and path efficiency.
+    """
+    if num_episodes <= 0:
+        raise ValueError(f"num_episodes must be positive, got {num_episodes}")
+
+    import math
+
+    from adaptive_rl.planners.astar3d import (
+        AStar3DPlanner,
+        check_segment_collision,
+        compute_path_min_obstacle_clearance,
+    )
+
+    if planner is None:
+        planner = AStar3DPlanner(resolution=0.5, connectivity=26)
+
+    close_env = False
+    if env is None:
+        env = DroneNavigation3DEnv()
+        close_env = True
+
+    try:
+        episode_records: List[Dict[str, Any]] = []
+        planning_times_ms: List[float] = []
+        successes: List[bool] = []
+        collisions: List[bool] = []
+        path_lengths: List[float] = []
+        straight_dists: List[float] = []
+        path_efficiencies: List[float] = []
+        min_clearances: List[float] = []
+
+        unwrapped = getattr(env, "unwrapped", env)
+        bounds = getattr(unwrapped, "bounds", (30.0, 30.0, 15.0))
+        collision_radius = getattr(unwrapped, "collision_radius", 0.8)
+        target_radius = getattr(unwrapped, "target_radius", 1.5)
+
+        if split is not None:
+            from adaptive_rl.evaluation.generalization import get_split_seeds
+
+            seeds: Sequence[Optional[int]] = get_split_seeds(split, num_episodes=num_episodes)
+        else:
+            seeds = [
+                (base_seed + ep) if base_seed is not None else None for ep in range(num_episodes)
+            ]
+
+        for ep in range(num_episodes):
+            seed = seeds[ep]
+            reset_options = {"split": split} if split is not None else None
+            obs, info = env.reset(seed=seed, options=reset_options)
+            info = info or {}
+
+            start = info.get("position")
+            if start is None:
+                start = getattr(
+                    unwrapped,
+                    "_position",
+                    getattr(unwrapped, "default_start", np.array([5.0, 5.0, 5.0])),
+                )
+            start = np.asarray(start, dtype=np.float64)
+
+            goal = info.get("goal")
+            if goal is None:
+                goal = getattr(
+                    unwrapped,
+                    "_goal",
+                    getattr(unwrapped, "default_goal", np.array([25.0, 25.0, 10.0])),
+                )
+            goal = np.asarray(goal, dtype=np.float64)
+
+            obstacles = getattr(unwrapped, "_obstacles", getattr(unwrapped, "obstacles", []))
+
+            plan_result = planner.plan_detailed(
+                start_pos=start,
+                goal_pos=goal,
+                bounds=bounds,
+                obstacles=obstacles,
+                collision_radius=collision_radius,
+            )
+
+            planning_times_ms.append(plan_result.planning_time_ms)
+            path = plan_result.path
+
+            is_success = False
+            is_collision = False
+            path_len: Optional[float] = None
+            straight_dist: Optional[float] = float(np.linalg.norm(goal - start))
+            path_eff: Optional[float] = None
+            min_clear: Optional[float] = None
+
+            if path is not None and len(path) >= 2:
+                # 1. Success condition: path reaches within target_radius of goal
+                # AND does not violate collision constraints
+                dist_to_goal = float(np.linalg.norm(path[-1] - goal))
+                reaches_goal = dist_to_goal <= target_radius
+
+                # 2. Collision condition: every segment must satisfy clearance
+                collided = False
+                for p_a, p_b in zip(path[:-1], path[1:]):
+                    col, _ = check_segment_collision(
+                        p_a,
+                        p_b,
+                        bounds=bounds,
+                        obstacles=obstacles,
+                        collision_radius=collision_radius,
+                    )
+                    if col:
+                        collided = True
+                        break
+
+                is_collision = collided
+                is_success = reaches_goal and (not is_collision)
+
+                # 3. Standard trajectory quality metrics
+                traj_metrics = compute_trajectory_metrics(
+                    positions=path,
+                    goal=goal,
+                    obstacles=obstacles,
+                )
+                path_len = traj_metrics["path_length"]
+                straight_dist = traj_metrics["straight_line_distance"]
+                path_eff = traj_metrics["path_efficiency"]
+                min_clear = compute_path_min_obstacle_clearance(
+                    path=path,
+                    obstacles=obstacles,
+                    collision_radius=collision_radius,
+                )
+            else:
+                is_success = False
+                is_collision = False
+
+            successes.append(is_success)
+            collisions.append(is_collision)
+            if path_len is not None:
+                path_lengths.append(path_len)
+            if straight_dist is not None:
+                straight_dists.append(straight_dist)
+            if path_eff is not None:
+                path_efficiencies.append(path_eff)
+            if min_clear is not None and math.isfinite(min_clear):
+                min_clearances.append(min_clear)
+
+            episode_records.append(
+                {
+                    "episode_index": ep,
+                    "seed": seed,
+                    "success": is_success,
+                    "collision": is_collision,
+                    "planning_time_ms": round(plan_result.planning_time_ms, 2),
+                    "nodes_expanded": plan_result.nodes_expanded,
+                    "status": plan_result.status,
+                    "path_length": round(path_len, 2) if path_len is not None else None,
+                    "straight_line_distance": round(straight_dist, 2)
+                    if straight_dist is not None
+                    else None,
+                    "path_efficiency": round(path_eff, 4) if path_eff is not None else None,
+                    "min_obstacle_clearance": round(min_clear, 2)
+                    if min_clear is not None
+                    else None,
+                    "waypoints_count": len(path) if path is not None else 0,
+                }
+            )
+
+        n_ep = len(successes)
+        mean_time_ms = float(np.mean(planning_times_ms)) if planning_times_ms else 0.0
+        mean_path = float(np.mean(path_lengths)) if path_lengths else None
+        std_path = float(np.std(path_lengths)) if path_lengths else None
+        mean_straight = float(np.mean(straight_dists)) if straight_dists else None
+        mean_eff = float(np.mean(path_efficiencies)) if path_efficiencies else None
+        mean_clear = float(np.mean(min_clearances)) if min_clearances else None
+
+        succ_rate = sum(successes) / n_ep if n_ep > 0 else 0.0
+        coll_rate = sum(collisions) / n_ep if n_ep > 0 else 0.0
+
+        return PlannerEvaluationMetrics(
+            episodes=n_ep,
+            success_rate=round(succ_rate, 4),
+            collision_rate=round(coll_rate, 4),
+            mean_planning_time_ms=round(mean_time_ms, 2),
+            mean_planning_time=round(mean_time_ms / 1000.0, 5),
+            mean_path_length=round(mean_path, 2) if mean_path is not None else None,
+            std_path_length=round(std_path, 2) if std_path is not None else None,
+            mean_straight_line_distance=round(mean_straight, 2)
+            if mean_straight is not None
+            else None,
+            mean_path_efficiency=round(mean_eff, 4) if mean_eff is not None else None,
+            mean_min_obstacle_clearance=round(mean_clear, 2) if mean_clear is not None else None,
+            episode_records=episode_records,
+            additional_metrics={
+                "mean_planning_time_ms": round(mean_time_ms, 2),
+                "path_efficiency": round(mean_eff, 4) if mean_eff is not None else None,
+                "mean_path_efficiency": round(mean_eff, 4) if mean_eff is not None else None,
+                "straight_line_distance": round(mean_straight, 2)
+                if mean_straight is not None
+                else None,
+                "mean_straight_line_distance": round(mean_straight, 2)
+                if mean_straight is not None
+                else None,
+                "min_obstacle_clearance": round(mean_clear, 2) if mean_clear is not None else None,
+                "mean_min_obstacle_clearance": round(mean_clear, 2)
+                if mean_clear is not None
+                else None,
+                "planning_time": round(mean_time_ms / 1000.0, 5),
+                "feasibility_type": "geometric",
+            },
+        )
+    finally:
+        if close_env:
+            env.close()
+
+
+def compare_with_planner(
+    ppo_algorithm: BaseAlgorithm,
+    planner: Optional[Any] = None,
+    random_policy: Optional[BaseAlgorithm] = None,
+    env: Optional[gym.Env] = None,
+    num_episodes: int = 20,
+    base_seed: Optional[int] = 42,
+    output_path: Optional[str | Path] = None,
+    split: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Execute fair head-to-head comparison across PPO, Classical Planner, and Random Policy.
+
+    All three methods are evaluated on the exact same procedural environment seeds.
+    Exports structured benchmark comparison to output_path if provided.
+    """
+    close_env = False
+    if env is None:
+        env = DroneNavigation3DEnv()
+        close_env = True
+
+    try:
+        from adaptive_rl.planners.astar3d import AStar3DPlanner
+
+        effective_base_seed = base_seed if split is None else None
+        if planner is None:
+            planner = AStar3DPlanner(resolution=0.5, connectivity=26)
+        if random_policy is None:
+            random_policy = RandomPolicy(action_space=env.action_space, seed=effective_base_seed)
+
+        # 1. PPO Policy evaluation
+        ppo_eval = Evaluator(algorithm=ppo_algorithm, env=env)
+        ppo_metrics = ppo_eval.evaluate(
+            num_episodes=num_episodes,
+            deterministic=True,
+            base_seed=effective_base_seed,
+            split=split,
+        )
+
+        # 2. Random Policy baseline evaluation
+        rand_eval = Evaluator(algorithm=random_policy, env=env)
+        rand_metrics = rand_eval.evaluate(
+            num_episodes=num_episodes,
+            deterministic=False,
+            base_seed=effective_base_seed,
+            split=split,
+        )
+
+        # 3. Classical A* Planner evaluation
+        planner_metrics = evaluate_planner(
+            planner=planner,
+            env=env,
+            num_episodes=num_episodes,
+            base_seed=effective_base_seed,
+            split=split,
+        )
+
+        # Build comparison summary
+        seeds_used: List[Optional[int]]
+        if split is not None:
+            from adaptive_rl.evaluation.generalization import get_split_seeds
+
+            seeds_used = list(get_split_seeds(split, num_episodes=num_episodes))
+        else:
+            seeds_used = [
+                (base_seed + i) if base_seed is not None else None for i in range(num_episodes)
+            ]
+
+        comparison_data: Dict[str, Any] = {
+            "methodology_note": (
+                "A* planner finds geometrically valid collision-free paths through spatial lattice search "
+                "without simulating drone dynamics. PPO and Random policies execute control actions in closed-loop "
+                "simulation subject to drone inertia, actuation limits, and environment dynamics."
+            ),
+            "evaluation_config": {
+                "num_episodes": num_episodes,
+                "base_seed": effective_base_seed,
+                "seeds": seeds_used,
+                "split": split,
+            },
+            "planner_config": {
+                "name": "AStar3DPlanner",
+                "resolution": planner.resolution,
+                "connectivity": planner.connectivity,
+                "max_iterations": planner.max_iterations,
+                "tolerance": planner.tolerance,
+                "feasibility_type": "geometric",
+            },
+            "summary": {
+                "PPO": {
+                    "feasibility_type": "dynamic",
+                    "success_rate": round(ppo_metrics.success_rate, 4)
+                    if ppo_metrics.success_rate is not None
+                    else None,
+                    "collision_rate": round(ppo_metrics.collision_rate, 4)
+                    if ppo_metrics.collision_rate is not None
+                    else None,
+                    "mean_planning_time_ms": None,
+                    "mean_path_length": round(ppo_metrics.mean_path_length, 2)
+                    if ppo_metrics.mean_path_length is not None
+                    else None,
+                    "mean_path_efficiency": round(ppo_metrics.mean_path_efficiency, 4)
+                    if ppo_metrics.mean_path_efficiency is not None
+                    else None,
+                    "mean_reward": round(ppo_metrics.mean_reward, 2),
+                    "mean_steps": round(ppo_metrics.mean_episode_length, 1),
+                },
+                "Classical Planner (A*)": {
+                    "feasibility_type": "geometric",
+                    "feasibility_note": (
+                        "A* success denotes finding a geometrically collision-free path. "
+                        "The planner path is not executed through the drone dynamics."
+                    ),
+                    "success_rate": round(planner_metrics.success_rate, 4)
+                    if planner_metrics.success_rate is not None
+                    else None,
+                    "collision_rate": round(planner_metrics.collision_rate, 4)
+                    if planner_metrics.collision_rate is not None
+                    else None,
+                    "mean_planning_time_ms": round(planner_metrics.mean_planning_time_ms, 2),
+                    "mean_path_length": round(planner_metrics.mean_path_length, 2)
+                    if planner_metrics.mean_path_length is not None
+                    else None,
+                    "mean_path_efficiency": round(planner_metrics.mean_path_efficiency, 4)
+                    if planner_metrics.mean_path_efficiency is not None
+                    else None,
+                    "mean_reward": None,
+                    "mean_steps": None,
+                },
+                "Random Policy": {
+                    "feasibility_type": "dynamic",
+                    "success_rate": round(rand_metrics.success_rate, 4)
+                    if rand_metrics.success_rate is not None
+                    else None,
+                    "collision_rate": round(rand_metrics.collision_rate, 4)
+                    if rand_metrics.collision_rate is not None
+                    else None,
+                    "mean_planning_time_ms": None,
+                    "mean_path_length": round(rand_metrics.mean_path_length, 2)
+                    if rand_metrics.mean_path_length is not None
+                    else None,
+                    "mean_path_efficiency": round(rand_metrics.mean_path_efficiency, 4)
+                    if rand_metrics.mean_path_efficiency is not None
+                    else None,
+                    "mean_reward": round(rand_metrics.mean_reward, 2),
+                    "mean_steps": round(rand_metrics.mean_episode_length, 1),
+                },
+            },
+            "ppo_metrics": ppo_metrics.model_dump(),
+            "planner_metrics": planner_metrics.model_dump(),
+            "random_policy_metrics": rand_metrics.model_dump(),
+        }
+
+        if output_path is not None:
+            target = Path(output_path)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with open(target, "w", encoding="utf-8") as f:
+                json.dump(comparison_data, f, indent=2)
+
+        return comparison_data
     finally:
         if close_env:
             env.close()
@@ -955,6 +1448,8 @@ __all__ = [
     "EpisodeEvaluationRecord",
     "Evaluator",
     "compare_policies",
+    "compare_with_planner",
+    "evaluate_planner",
     "evaluate_ppo_policy",
     "evaluate_random_policy",
     "run_obstacle_density_experiment",

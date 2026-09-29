@@ -18,8 +18,10 @@ from adaptive_rl.algorithms.registry import (
     get_algorithm_metadata,
     list_algorithms,
     list_all_algorithm_metadata,
+    load_algorithm_from_pretrained,
     register_algorithm,
 )
+from adaptive_rl.algorithms.sac import SACAlgorithm
 
 __all__ = [
     "AlgorithmMetadata",
@@ -31,11 +33,13 @@ __all__ = [
     "PPOAdaptationAdapter",
     "RandomPolicy",
     "SACAdaptationAdapter",
+    "SACAlgorithm",
     "algorithm_registry",
     "get_algorithm_factory",
     "get_algorithm_metadata",
     "list_algorithms",
     "list_all_algorithm_metadata",
+    "load_algorithm_from_pretrained",
     "register_algorithm",
     "run_adaptation_update",
 ]

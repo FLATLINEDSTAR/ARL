@@ -1,0 +1,38 @@
+name: "drone_sac"
+seed: 42
+
+algorithm:
+  name: "sac"
+  learning_rate: 0.0003
+  gamma: 0.99
+  batch_size: 256
+  parameters:
+    buffer_size: 100000
+    tau: 0.005
+    learning_starts: 100
+    ent_coef: "auto"
+
+environment:
+  name: "drone"
+  max_steps: 200
+  parameters:
+    bounds: [30.0, 30.0, 15.0]
+    start_pos: [5.0, 5.0, 5.0]
+    goal_pos: [25.0, 25.0, 10.0]
+    num_obstacles: 4
+    obstacle_radius: 2.0
+    target_radius: 1.5
+    collision_radius: 0.8
+    progress_weight: 2.0
+
+training:
+  total_timesteps: 50000
+  checkpoint_freq: 10000
+  log_interval: 10
+
+evaluation:
+  eval_episodes: 20
+  deterministic: true
+
+output_dir: "artifacts"
+log_dir: "artifacts/logs"

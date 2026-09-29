@@ -1,4 +1,4 @@
-# AdaptiveRL
+# AdaptiveRL (Open Source)
 
 AdaptiveRL is an educational reinforcement-learning project in which a Proximal Policy Optimization (PPO) agent learns to navigate a simulated 3D drone through an obstacle-filled environment toward a target coordinate.
 
@@ -460,6 +460,8 @@ adaptive-rl benchmark budgets \
 ```
 
 Machine-readable results are written to `artifacts/benchmarks/learning_curve_budget.json` and `learning_curve_budget.csv`, with one saved model per budget. The JSON reports `status`, `completed_budgets`, `failed_budget`, and `error`, so a partially completed run is never mistaken for a complete one; the command exits non-zero when a budget fails and keeps the artifacts of every budget that finished.
+
+Each budget starts from the same configuration, training seed, and evaluation settings, but trains a fresh model and environment lifecycle. Evaluation group seeds identify statistical groups; reset seeds for their episodes are derived independently of the requested episode count. JSON records the evaluation split, environment-configuration fingerprint, and runtime/library versions. Repeatability is intended within a fixed software/hardware stack, but bit-for-bit training results are not guaranteed across devices, library versions, or nondeterministic accelerator kernels.
 
 Add `--plot` to render `learning_curve_budget.png`. Plotting uses the optional Matplotlib extra:
 

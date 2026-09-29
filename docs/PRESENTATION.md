@@ -6,12 +6,12 @@
 
 ### Slide 2: Kinematic Simulation & Physics Model
 - 3-DOF translation with semi-implicit Euler integration
-- Aerodynamic drag damping ($c_{drag}=0.25$)
+- Aerodynamic drag damping ($c_{drag}=0.05$)
 - 16-ray spherical LiDAR rangefinder for spherical obstacles
 
 ### Slide 3: Reinforcement Learning Architecture
 - Algorithm: Proximal Policy Optimization (PPO) via Stable-Baselines3
-- State Space: 28-dimensional normalized vector (positions, velocities, goal vector, LiDAR ranges)
+- State Space: 29-dimensional normalized vector (positions, velocities, goal vector, relative target vector, distance ratio, 16 LiDAR ranges)
 - Action Space: Continuous 3D thrust acceleration $[-1.0, 1.0]^3$
 - Reward Formulation: Distance-progress shaping with collision and step penalties
 

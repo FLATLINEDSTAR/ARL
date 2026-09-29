@@ -284,6 +284,55 @@ class EvaluationMetrics(BaseModel):
     )
 
 
+class PlannerEvaluationMetrics(BaseModel):
+    """Container for classical 3D motion planner evaluation results."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    episodes: int = Field(..., gt=0, description="Total evaluation episodes executed")
+    success_rate: Optional[float] = Field(
+        None, ge=0.0, le=1.0, description="Fraction of queries reaching target without collision"
+    )
+    collision_rate: Optional[float] = Field(
+        None, ge=0.0, le=1.0, description="Fraction of queries violating clearance"
+    )
+    mean_planning_time_ms: float = Field(
+        0.0, ge=0.0, description="Mean planning wall-clock time in milliseconds"
+    )
+    mean_planning_time: float = Field(
+        0.0, ge=0.0, description="Mean planning wall-clock time in seconds (for standardization)"
+    )
+    mean_path_length: Optional[float] = Field(
+        None, ge=0.0, description="Mean cumulative 3D path length in meters"
+    )
+    std_path_length: Optional[float] = Field(
+        None, ge=0.0, description="Standard deviation of path length in meters"
+    )
+    mean_straight_line_distance: Optional[float] = Field(
+        None, ge=0.0, description="Mean straight-line start-to-goal distance in meters"
+    )
+    mean_path_efficiency: Optional[float] = Field(
+        None, ge=0.0, le=1.0, description="Mean ratio of straight-line distance to path length"
+    )
+    mean_min_obstacle_clearance: Optional[float] = Field(
+        None, description="Mean minimum obstacle surface clearance in meters"
+    )
+    episode_records: List[Dict[str, Any]] = Field(
+        default_factory=list, description="Per-episode planning query records and telemetry"
+    )
+    additional_metrics: Dict[str, Any] = Field(
+        default_factory=dict, description="Additional domain-specific metrics"
+    )
+
+
+def _first_not_none(*values: Any) -> Any:
+    """Return the first value that is not None, or None if all are None."""
+    for val in values:
+        if val is not None:
+            return val
+    return None
+
+
 class StandardizedExperimentMetrics(BaseModel):
     """Standardized cross-paradigm evaluation metrics schema for AdaptiveRL.
 
@@ -419,12 +468,6 @@ class StandardizedExperimentMetrics(BaseModel):
     ) -> StandardizedExperimentMetrics:
         """Construct standardized metrics from RL EvaluationMetrics."""
         extra = eval_metrics.additional_metrics
-
-        def _first_not_none(*values: Any) -> Any:
-            for val in values:
-                if val is not None:
-                    return val
-            return None
 
         # Extract traffic-specific aggregates
         mean_q = _first_not_none(extra.get("mean_queue_length"), extra.get("mean_queue"))
@@ -582,6 +625,22 @@ class StandardizedExperimentMetrics(BaseModel):
         mean_path = getattr(planner_metrics, "mean_path_length", None)
         mean_time = getattr(planner_metrics, "mean_planning_time", None)
 
+        path_eff = _first_not_none(
+            getattr(planner_metrics, "mean_path_efficiency", None),
+            extra.get("path_efficiency"),
+            extra.get("mean_path_efficiency"),
+        )
+        straight_dist = _first_not_none(
+            getattr(planner_metrics, "mean_straight_line_distance", None),
+            extra.get("mean_straight_line_distance"),
+            extra.get("straight_line_distance"),
+        )
+        min_clear = _first_not_none(
+            getattr(planner_metrics, "mean_min_obstacle_clearance", None),
+            extra.get("mean_min_obstacle_clearance"),
+            extra.get("min_obstacle_clearance"),
+        )
+
         return cls(
             episodes=getattr(planner_metrics, "episodes", 1),
             episode_return=None,  # Classical planners do not accumulate RL reward returns
@@ -591,7 +650,9 @@ class StandardizedExperimentMetrics(BaseModel):
             truncation_rate=None,
             episode_length=None,  # Independent: RL step count is not applicable to geometric paths
             path_length=mean_path,
-            path_efficiency=extra.get("path_efficiency"),
+            path_efficiency=path_eff,
+            straight_line_distance=straight_dist,
+            min_obstacle_clearance=min_clear,
             planning_time=mean_time,
             generalization_gap=None,
             battery_remaining=None,
@@ -614,6 +675,7 @@ class StandardizedExperimentMetrics(BaseModel):
 
 __all__ = [
     "EvaluationMetrics",
+    "PlannerEvaluationMetrics",
     "StandardizedExperimentMetrics",
     "compute_trajectory_metrics",
 ]

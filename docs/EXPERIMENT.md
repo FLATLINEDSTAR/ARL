@@ -70,7 +70,7 @@ artifacts/benchmarks/
     └── ...
 ```
 
-JSON contains benchmark settings, one result object per completed budget, pooled metrics, per-seed summaries, cross-seed Student's t statistics, and plot-ready series. CSV contains the pooled per-budget performance values with provenance columns.
+JSON contains benchmark settings, one result object per completed budget, pooled metrics, per-seed summaries, cross-seed Student's t statistics, and plot-ready series. Its provenance records Python and relevant library versions, normalized training/evaluation environment settings, and their SHA-256 fingerprint. Each budget also records its model device and evaluation split. CSV contains the pooled per-budget performance values with provenance columns.
 
 The benchmark writes its JSON and CSV artifacts before attempting any plot and validates the JSON payload as strict JSON (finite numbers only, no NaN or Infinity, no non-native numeric types such as `float32` or `Path`), so an export failure cannot leave a half-written or unparseable report behind.
 
@@ -82,12 +82,13 @@ The benchmark writes its JSON and CSV artifacts before attempting any plot and v
 | `completed_budgets` | Budgets that trained and evaluated successfully, in run order |
 | `failed_budget` | The budget at which the run stopped, or `null` |
 | `error` | Sanitized `TypeName: message` for the failure (never a traceback), or `null` |
-| `benchmark` | Settings: `training_seed`, `evaluation_seeds`, `evaluation_group_seeds`, `evaluation_episodes`, `episodes_per_seed`, `deterministic`, `budgets`, plus the `seed_semantics`, `metric_semantics`, and `training_time_semantics` explanation strings |
+| `benchmark` | Settings: `training_seed`, `evaluation_seeds`, `evaluation_group_seeds`, `evaluation_episodes`, `episodes_per_seed`, `evaluation_split`, `deterministic`, `budgets`, plus seed-mapping, metric, and training-time semantics |
+| `provenance` | Python/library versions, normalized training/evaluation environment configuration, and a SHA-256 environment-configuration fingerprint |
 | `results` | One object per completed budget (see below) |
 | `plot` | `requested` (bool), `path`, and `error` for the optional figure |
 | `plot_data` | Plot-ready series: `budgets`, `trained_timesteps`, `success_rate`, `mean_reward` |
 
-Each `results` object carries `budget_timesteps`, `trained_timesteps`, the pooled metrics (`success_rate`, `collision_rate`, `timeout_rate`, `mean_reward`, `std_reward`, `mean_episode_length`), `training_time_seconds`, `model_path`, `training_seed`, `evaluation_seeds`, `evaluation_episodes`, `deterministic`, `algorithm`, `environment`, `descriptive_metrics`, `per_seed_summaries`, `cross_seed_statistics`, and `training_metadata`. `descriptive_metrics` is the same pooled sample as the top-level metrics and additionally reports `episodes`; `per_seed_summaries` has exactly one entry per evaluation seed group; `cross_seed_statistics` holds the Student's t statistics over those seed groups (`sample_count` counts seeds, not episodes); `training_metadata` repeats the training/evaluation provenance for the model behind that row.
+Each `results` object carries `budget_timesteps`, `trained_timesteps`, the pooled metrics (`success_rate`, `collision_rate`, `timeout_rate`, `mean_reward`, `std_reward`, `mean_episode_length`), `training_time_seconds`, `model_path`, `training_seed`, `evaluation_seeds`, `evaluation_episodes`, `evaluation_split`, `deterministic`, `algorithm`, `environment`, `environment_fingerprint`, `device`, `descriptive_metrics`, `per_seed_summaries`, `cross_seed_statistics`, and `training_metadata`. `descriptive_metrics` is the same pooled sample as the top-level metrics and additionally reports `episodes`; `per_seed_summaries` has exactly one entry per evaluation seed group; `cross_seed_statistics` holds the Student's t statistics over those seed groups (`sample_count` counts seeds, not episodes); `training_metadata` repeats the training/evaluation provenance for the model behind that row.
 
 **CSV schema.** One row per completed budget with columns `budget_timesteps`, `trained_timesteps`, `success_rate`, `collision_rate`, `timeout_rate`, `mean_reward`, `std_reward`, `mean_episode_length`, `training_time_seconds`, `model_path`, `training_seed`, `evaluation_seeds` (seeds joined with `;`), `evaluation_episodes`, and `deterministic`.
 
@@ -102,6 +103,8 @@ The built-in benchmark defaults are budgets `[5000, 10000, 25000, 50000]`, train
 `training_time_seconds` measures only the call to `PPOAlgorithm.train()` using a monotonic clock. It excludes environment/model setup, final model serialization, metadata writing, evaluation, JSON/CSV export, and plotting. Training metadata also retains the broader legacy `duration_seconds` lifecycle measure, which is not the benchmark training-time metric. Neither duration is hardware-independent.
 
 The named benchmark metrics (`success_rate`, `collision_rate`, `timeout_rate`, `mean_reward`, `std_reward`, and `mean_episode_length`) are pooled descriptive summaries over all evaluated episodes for a budget. Reward standard deviation is the sample standard deviation across pooled episode returns and is unavailable (`null` in JSON, blank in CSV) with fewer than two episodes. Success and collision rates use episodes that reported the corresponding outcome field; timeout rate is based only on Gymnasium's actual `truncated` signal. The JSON additionally retains per-seed summaries and cross-seed Student's t statistics from the reusable evaluator; these are distinct from the pooled metrics and are not estimates based on the pooled episode sample. Within-seed reward and episode-length standard deviations follow the evaluator's existing population-standard-deviation convention; cross-seed uncertainty is then calculated over those seed summaries using sample-standard-deviation and Student's t conventions.
+
+An evaluation seed is a group identifier, not itself necessarily the environment reset seed. In the default `custom` mode, each episode reset seed is generated with an injective Cantor-pair mapping of the group seed and zero-based episode index. It is stable when the episode count is extended and keeps distinct group/episode pairs distinct. With `evaluation_split: train` or `test`, reset seeds are SHA-256-derived into that split's finite seed interval; mapping into a finite interval can collide. In split mode, evaluation group seeds must themselves be valid members of the selected partition (the custom defaults are not valid test-split seeds). Split evaluation requires training on the `train` split, so test layouts are not used in PPO rollouts. The default `custom` evaluation uses the configured environment without its training split restriction.
 
 Interpret the curves jointly: rising success rate and mean reward with a falling collision or timeout rate suggest improvement; flat metrics may indicate a plateau. Treat these curves as empirical observations, not as a monotonicity guarantee: each budget is an independent training run, and sampling and optimization noise can make a larger budget score worse than a smaller one on some metrics. A timeout is counted only when Gymnasium returns `truncated=True`, not merely because an episode has a particular length. The same seed groups and settings make evaluation conditions comparable, but do not remove variation from training or guarantee bit-for-bit results across hardware, PyTorch versions, or CUDA kernels.
 
@@ -119,7 +122,7 @@ The committed demo config uses `n_steps: 1024`, so those tiny budgets would be r
 
 ## 4. Multi-Seed Evaluation and Confidence Intervals
 
-Evaluation over several independent environment seeds helps show how policy performance varies with randomized starts and obstacles, instead of depending on one seed sequence. `--episodes` is the number of episodes run for each listed seed. Each requested seed owns a disjoint block of actual environment reset seeds (`seed * episodes_per_seed + episode_index`), avoiding overlap between adjacent requested seed groups; the requested seed and actual per-episode reset seed are both recorded. Duplicate requested seeds are rejected to avoid overweighting a repeated condition.
+Evaluation over several independent environment seeds helps show how policy performance varies with randomized starts and obstacles, instead of depending on one seed sequence. `--episodes` is the number of episodes run for each listed seed. Each requested seed identifies a group; the environment reset seed is derived for each group/episode pair and does not change for existing episodes when the requested episode count increases. For the `custom` mapping the pairing is injective; for bounded train/test splits the SHA-256-derived mapping is deterministic but sampling with replacement means collisions are possible. The requested group seed and actual per-episode reset seed are both recorded. Duplicate requested group seeds are rejected to avoid overweighting a repeated condition.
 
 Episode records expose both seed meanings under explicit names: `evaluation_group_seed` is the requested evaluation seed (the statistical grouping unit) and `episode_reset_seed` is the per-episode environment reset seed. The legacy field names keep their documented meanings — `seed` equals `evaluation_group_seed` and `episode_seed` equals `episode_reset_seed`. Per-seed summaries expose `evaluation_group_seed` alongside `seed`, and report metadata carries `evaluation_group_seeds` plus a `seed_semantics` string.
 
@@ -329,3 +332,58 @@ adaptive-rl experiment-ablation --timesteps 500 --episodes 5 --seed 42
 Outputs are automatically exported to:
 - `artifacts/benchmarks/reward_ablation.json` (detailed per-variant results and configuration metadata)
 - `artifacts/benchmarks/reward_ablation.csv` (tabular benchmark data for analysis)
+
+---
+
+## 6. Experiment Manifest and Provenance Auditing
+
+Every training and benchmark run automatically persists a comprehensive experiment manifest to `artifacts/metadata/{name}_manifest.json` (Issue #248). The manifest ensures scientific reproducibility and verifiable artifact provenance without requiring external cloud trackers.
+
+### Manifest Schema & Contents
+
+The manifest document captures:
+1. **Git Provenance**:
+   - `git_commit`: Full 40-character SHA-1 commit hash (or `"unknown"` if executed outside a Git repository).
+   - `git_branch`: Active Git branch name.
+   - `git_dirty`: Boolean flag indicating whether uncommitted source modifications were present at execution time.
+2. **Host System & Python Runtime**:
+   - `os_name`, `os_version`: Operating system platform and kernel release.
+   - `python_version`: Precise Python interpreter version.
+   - `architecture`: Hardware architecture (e.g. `x86_64`, `aarch64`).
+3. **Software Package Pinned Versions**:
+   - Explicit pinned versions of core dependencies: `adaptive_rl`, `torch`, `stable_baselines3`, `gymnasium`, `numpy`, `typer`, and `pydantic`.
+4. **Hardware & Compute Telemetry**:
+   - `device`: Primary compute device used (`cpu` or `cuda`).
+   - `gpu_name`, `gpu_count`: Dedicated accelerator specifications if GPU is available.
+   - `cpu_count`: Available logical CPU cores.
+5. **Execution Timing & Invocation**:
+   - `started_at`, `finished_at`: Exact ISO 8601 UTC timestamps.
+   - `duration_seconds`: Total wall-clock duration of the experiment.
+   - `training_time_seconds`: Monotonic duration of interaction/training (excluding model serialization).
+   - `command`: Sanitized command line arguments (`sys.argv`).
+6. **Artifact Checksums & Provenance**:
+   - Full filesystem paths, file sizes, and **SHA-256 cryptographic digests** for all generated model weight files (`.zip`) and metric reports (`.json`).
+7. **Security & Sanitization**:
+   - The manifest generator strictly avoids recording environment credentials, API tokens, passwords, or unrelated private files.
+
+### Inspecting a Manifest via CLI
+
+Inspect and verify an experiment manifest using the CLI:
+
+```bash
+# Using 'inspect manifest'
+adaptive-rl inspect manifest artifacts/metadata/drone_ppo_manifest.json
+
+# Using 'manifest inspect'
+adaptive-rl manifest inspect artifacts/metadata/drone_ppo_manifest.json
+```
+
+The CLI renders a formatted terminal table detailing all categories and verifies whether linked artifact files exist and match their recorded SHA-256 checksums (`✓ Verified`).
+
+### Reproducing an Experiment from a Manifest
+
+To audit or reproduce a historical experiment:
+1. **Verify Source State**: Checkout the exact Git commit recorded in `git.git_commit`. If `git_dirty` is `true`, note that working-tree modifications were present.
+2. **Verify Environment**: Compare Python and package versions against `packages`.
+3. **Replay Configuration**: Instantiate the experiment using the identical `config` payload and `config.seed`.
+4. **Verify Generated Weights**: Calculate SHA-256 of the resulting model weights and compare against the manifest's `artifacts.model.sha256`.

@@ -16,7 +16,9 @@ import gymnasium as gym
 import numpy as np
 import torch
 
+from adaptive_rl.algorithms.base import BaseAlgorithm
 from adaptive_rl.algorithms.ppo import PPOAlgorithm
+from adaptive_rl.algorithms.registry import get_algorithm_factory
 from adaptive_rl.algorithms.sac import SACAlgorithm
 from adaptive_rl.config import ExperimentConfig
 from adaptive_rl.environments.registry import make_env
@@ -53,11 +55,14 @@ class TrainingResult:
     success_rate: Optional[float] = None
     collision_rate: Optional[float] = None
     metadata_path: Optional[Path] = None
+    manifest_path: Optional[Path] = None
     training_time_seconds: float = 0.0
 
 
 class AlgorithmTrainer:
     """Trainer orchestrating supported Stable-Baselines3 algorithm learning."""
+class RLTrainer:
+    """Trainer orchestrating reinforcement learning policy learning on the drone navigation environment."""
 
     def __init__(
         self,
@@ -106,6 +111,37 @@ class AlgorithmTrainer:
             seed=seed,
             **algo_params,
         )
+
+        algo_name = self.config.algorithm.name.lower()
+        self.algorithm: BaseAlgorithm
+        if algo_name == "ppo":
+            self.algorithm = PPOAlgorithm(
+                env=self.env,
+                learning_rate=lr,
+                gamma=gamma,
+                batch_size=batch_size,
+                seed=seed,
+                **algo_params,
+            )
+        elif algo_name == "sac":
+            self.algorithm = SACAlgorithm(
+                env=self.env,
+                learning_rate=lr,
+                gamma=gamma,
+                batch_size=batch_size,
+                seed=seed,
+                **algo_params,
+            )
+        else:
+            factory = get_algorithm_factory(algo_name)
+            self.algorithm = factory(
+                env=self.env,
+                learning_rate=lr,
+                gamma=gamma,
+                batch_size=batch_size,
+                seed=seed,
+                **algo_params,
+            )
 
     @staticmethod
     def _set_deterministic_seed(seed: int) -> None:
@@ -171,6 +207,23 @@ class AlgorithmTrainer:
         with open(metadata_path, "w", encoding="utf-8") as f:
             json.dump(meta_dict, f, indent=2)
 
+        # Generate and save experiment manifest (Issue #248)
+        from adaptive_rl.manifest import create_manifest, save_manifest
+
+        manifest = create_manifest(
+            experiment_name=self.config.name,
+            config_dict=self.config.model_dump(),
+            started_at=started_at,
+            finished_at=finished_at,
+            training_time_seconds=training_time_seconds,
+            artifacts={
+                "model": final_model_path,
+                "metadata": metadata_path,
+            },
+        )
+        manifest_path = metadata_dir / f"{self.config.name}_manifest.json"
+        save_manifest(manifest, manifest_path)
+
         return TrainingResult(
             experiment_name=self.config.name,
             total_timesteps=self.config.training.total_timesteps,
@@ -183,6 +236,7 @@ class AlgorithmTrainer:
             success_rate=self.metric_logger.success_rate,
             collision_rate=self.metric_logger.collision_rate,
             metadata_path=metadata_path,
+            manifest_path=manifest_path,
             training_time_seconds=training_time_seconds,
         )
 
@@ -214,6 +268,7 @@ class PPOTrainer(AlgorithmTrainer):
 
 class SACTrainer(AlgorithmTrainer):
     """Trainer for SAC using the same callbacks and artifact lifecycle."""
+PPOTrainer = RLTrainer
 
 
 def get_trainer(
@@ -227,3 +282,14 @@ def get_trainer(
     if algorithm_name not in trainer_types:
         raise ValueError(f"Unsupported training algorithm: {config.algorithm.name!r}")
     return trainer_types[algorithm_name](config=config, env=env, callbacks=callbacks)
+) -> RLTrainer:
+    """Factory returning the trainer based on configuration."""
+    return RLTrainer(config=config, env=env, callbacks=callbacks)
+
+
+__all__ = [
+    "PPOTrainer",
+    "RLTrainer",
+    "TrainingResult",
+    "get_trainer",
+]
