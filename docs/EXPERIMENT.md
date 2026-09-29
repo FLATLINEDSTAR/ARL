@@ -37,7 +37,9 @@ This document details the experimental methodology, hypotheses, benchmark variab
 
 The budget benchmark trains a fresh PPO model from the same base configuration at each requested training budget. Every model is evaluated with the same ordered evaluation seed groups, episode count per seed, environment parameters, algorithm settings, and deterministic-action setting; evaluation uses the saved model and a separate fresh environment. `--eval-seeds` selects the seed groups; `--episodes` is the number of episodes run within each group and does not determine how many seeds are evaluated.
 
-A single training seed is shared by every budget: `--training-seed` (or `benchmark.training_seed`, falling back to `seed`) is written into each budget's configuration copy before training, and the legacy algorithm-level `parameters.seed` value is dropped so that budgets differ only in budget size. Differences between budgets therefore cannot be attributed to re-seeding. Training itself is not guaranteed bit-for-bit reproducible across hardware, PyTorch versions, or CUDA kernels.
+A single training seed is shared by every budget: `--training-seed` (or `benchmark.training_seed`, falling back to `seed`) is written into each budget's configuration copy before training, and the legacy algorithm-level `parameters.seed` value is dropped so that budgets differ only in budget size. Differences between budgets therefore cannot be attributed to re-seeding. This produces one training trajectory per budget; it does not estimate between-run training variance. Training itself is not guaranteed bit-for-bit reproducible across hardware, PyTorch versions, or CUDA kernels.
+
+Budget inputs are validated, deduplicated by rejection, and canonicalized into ascending order. Caller-provided ordering is not preserved.
 
 ```bash
 adaptive-rl benchmark budgets \
@@ -65,12 +67,14 @@ artifacts/benchmarks/
 ├── learning_curve_budget.json
 ├── learning_curve_budget.csv
 └── learning_curve/
+    ├── budget_5000/budget_result.json
     ├── budget_5000/models/ppo_budget_5000_final.zip
+    ├── budget_10000/budget_result.json
     ├── budget_10000/models/ppo_budget_10000_final.zip
     └── ...
 ```
 
-JSON contains benchmark settings, one result object per completed budget, pooled metrics, per-seed summaries, cross-seed Student's t statistics, and plot-ready series. Its provenance records Python and relevant library versions, normalized training/evaluation environment settings, and their SHA-256 fingerprint. Each budget also records its model device and evaluation split. CSV contains the pooled per-budget performance values with provenance columns.
+JSON contains benchmark settings, one result object per completed budget, pooled metrics, per-seed summaries, cross-seed Student's t statistics, and plot-ready series. Its provenance records the source commit and dirty-tree state when available, Python and relevant library versions, the effective configuration fingerprint, training/evaluation seeds, normalized training/evaluation environment settings, and their SHA-256 fingerprint. Each budget also records its model device and evaluation split. CSV contains the pooled per-budget performance values with provenance columns.
 
 The benchmark writes its JSON and CSV artifacts before attempting any plot and validates the JSON payload as strict JSON (finite numbers only, no NaN or Infinity, no non-native numeric types such as `float32` or `Path`), so an export failure cannot leave a half-written or unparseable report behind.
 
@@ -83,20 +87,20 @@ The benchmark writes its JSON and CSV artifacts before attempting any plot and v
 | `failed_budget` | The budget at which the run stopped, or `null` |
 | `error` | Sanitized `TypeName: message` for the failure (never a traceback), or `null` |
 | `benchmark` | Settings: `training_seed`, `evaluation_seeds`, `evaluation_group_seeds`, `evaluation_episodes`, `episodes_per_seed`, `evaluation_split`, `deterministic`, `budgets`, plus seed-mapping, metric, and training-time semantics |
-| `provenance` | Python/library versions, normalized training/evaluation environment configuration, and a SHA-256 environment-configuration fingerprint |
+| `provenance` | Git commit/dirty state, Python/library versions, effective configuration fingerprint, training/evaluation seeds, normalized training/evaluation environment configuration, and its SHA-256 fingerprint |
 | `results` | One object per completed budget (see below) |
 | `plot` | `requested` (bool), `path`, and `error` for the optional figure |
 | `plot_data` | Plot-ready series: `budgets`, `trained_timesteps`, `success_rate`, `mean_reward` |
 
 Each `results` object carries `budget_timesteps`, `trained_timesteps`, the pooled metrics (`success_rate`, `collision_rate`, `timeout_rate`, `mean_reward`, `std_reward`, `mean_episode_length`), `training_time_seconds`, `model_path`, `training_seed`, `evaluation_seeds`, `evaluation_episodes`, `evaluation_split`, `deterministic`, `algorithm`, `environment`, `environment_fingerprint`, `device`, `descriptive_metrics`, `per_seed_summaries`, `cross_seed_statistics`, and `training_metadata`. `descriptive_metrics` is the same pooled sample as the top-level metrics and additionally reports `episodes`; `per_seed_summaries` has exactly one entry per evaluation seed group; `cross_seed_statistics` holds the Student's t statistics over those seed groups (`sample_count` counts seeds, not episodes); `training_metadata` repeats the training/evaluation provenance for the model behind that row.
 
-**CSV schema.** One row per completed budget with columns `budget_timesteps`, `trained_timesteps`, `success_rate`, `collision_rate`, `timeout_rate`, `mean_reward`, `std_reward`, `mean_episode_length`, `training_time_seconds`, `model_path`, `training_seed`, `evaluation_seeds` (seeds joined with `;`), `evaluation_episodes`, and `deterministic`.
+**CSV schema.** One row per completed budget with columns `budget_timesteps`, `trained_timesteps`, `pooled_success_rate`, `pooled_collision_rate`, `pooled_timeout_rate`, `pooled_mean_reward`, `pooled_std_reward`, `pooled_mean_episode_length`, `training_time_seconds`, `model_path`, `training_seed`, `evaluation_seeds` (seeds joined with `;`), `evaluation_episodes`, and `deterministic`. These `pooled_*` fields describe all evaluated episodes; seed-level summaries and cross-seed statistics remain separate in JSON and are not represented as independent pooled observations.
 
-**Partial failures.** If a budget fails, the run stops at that budget: JSON and CSV are still written with `status: "failed"`, `completed_budgets`, `failed_budget`, and `error`, and `adaptive-rl benchmark budgets` prints a partial-failure report and exits with status `1`. Model artifacts and metrics for budgets listed in `completed_budgets` remain on disk and valid; a failed budget is never serialized as a completed result.
+**Partial failures.** Each budget trains and evaluates in a temporary sibling directory. Only after both stages succeed is the directory atomically published with a `budget_result.json` marked `status: "completed"`; a failed budget's temporary directory is removed and no final budget directory is published. A process interrupted without cleanup may leave a `.budget_<N>.lock` and staging directory; the next run fails closed for that budget. After confirming no benchmark process is active, remove the stale lock and staging directory manually before retrying. The run then stops at a failed budget: JSON and CSV are written with `status: "failed"`, `completed_budgets`, `failed_budget`, and `error`, and `adaptive-rl benchmark budgets` prints a partial-failure report and exits with status `1`. Model artifacts and metrics for budgets listed in `completed_budgets` remain on disk and valid; a failed budget is never serialized as a completed result. Output directories containing an existing report or requested budget artifact are rejected; choose a fresh output directory for each run.
 
 **Plotting.** Pass `--plot` to additionally render `learning_curve_budget.png`. Matplotlib is imported only when plotting is requested, comes from the optional `plot` extra (`python -m pip install -e ".[plot]"`, included in `[all]`), and generated figures are always closed after saving. `--plot-x-axis trained` (default) uses the timesteps PPO actually collected, while `--plot-x-axis requested` uses the requested budget; the axis label always states which one is plotted, and the two differ whenever a budget is not aligned to a rollout boundary. A plot failure cannot corrupt benchmark data: it is recorded in `plot.error`, the JSON is rewritten with that field, the CSV is unchanged, and the CLI exits with status `1` after reporting the completed benchmark.
 
-The built-in benchmark defaults are budgets `[5000, 10000, 25000, 50000]`, training seed `42`, evaluation seed groups `[42, 43, 44, 45, 46]`, and `20` episodes per seed. A `benchmark` section in the YAML supplies these values instead; explicit CLI options override the corresponding config values. Legacy `evaluation.eval_episodes` does not control the number of seed groups or the benchmark episode count. Thus, without overrides, the default evaluation runs five seed groups with twenty episodes each, not twenty seed groups with twenty episodes each.
+The built-in benchmark defaults are budgets `[5000, 10000, 25000, 50000]`, training seed `42`, evaluation seed groups `[42, 43, 44, 45, 46]`, and `20` episodes per seed. A `benchmark` section in the YAML supplies these values instead; explicit CLI options override the corresponding config values. Legacy `evaluation.eval_episodes` does not control the number of seed groups or the benchmark episode count. Thus, without overrides, the default evaluation runs five seed groups with twenty episodes each, not twenty seed groups with twenty episodes each. The shared training seed supports paired budget comparisons but is not a sample of independent training runs.
 
 `budget_timesteps` records the requested budget, while `trained_timesteps` records the actual environment interactions reported by Stable-Baselines3. For example, budget `65` with PPO `n_steps: 64` trains to `128` steps because PPO collects complete rollouts. Compare results using `trained_timesteps` when budgets are not aligned to rollout sizes.
 

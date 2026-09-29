@@ -18,6 +18,8 @@ import json
 import math
 import os
 import platform
+import shutil
+import subprocess
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -45,12 +47,12 @@ PLOT_X_AXES: tuple[str, ...] = ("trained", "requested")
 CSV_FIELDNAMES: tuple[str, ...] = (
     "budget_timesteps",
     "trained_timesteps",
-    "success_rate",
-    "collision_rate",
-    "timeout_rate",
-    "mean_reward",
-    "std_reward",
-    "mean_episode_length",
+    "pooled_success_rate",
+    "pooled_collision_rate",
+    "pooled_timeout_rate",
+    "pooled_mean_reward",
+    "pooled_std_reward",
+    "pooled_mean_episode_length",
     "training_time_seconds",
     "model_path",
     "training_seed",
@@ -157,11 +159,71 @@ def _runtime_provenance() -> dict[str, Any]:
             packages[distribution] = importlib.metadata.version(distribution)
         except importlib.metadata.PackageNotFoundError:
             packages[distribution] = None
+
+    repository_root = Path(__file__).resolve().parents[3]
+    try:
+        git_commit = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repository_root,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        git_commit = None
+
+    try:
+        working_tree_dirty = bool(
+            subprocess.run(
+                ["git", "status", "--porcelain"],
+                cwd=repository_root,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+        )
+    except (OSError, subprocess.CalledProcessError):
+        working_tree_dirty = None
+
     return {
         "adaptive_rl_version": adaptive_rl.__version__,
         "python_version": platform.python_version(),
         "packages": packages,
+        "git_commit": git_commit,
+        "working_tree_dirty": working_tree_dirty,
     }
+
+
+def _configuration_fingerprint(
+    config: ExperimentConfig,
+    *,
+    budgets: Sequence[int],
+    training_seed: int,
+    evaluation_seeds: Sequence[int],
+    evaluation_episodes: int,
+    deterministic: bool,
+    evaluation_split: str,
+) -> str:
+    """Fingerprint the input config together with effective benchmark overrides."""
+    experiment_config = config.model_dump(mode="python")
+    experiment_config.pop("benchmark", None)
+    experiment_config.pop("output_dir", None)
+    experiment_config.pop("log_dir", None)
+    identity = {
+        "experiment_config": experiment_config,
+        "effective_benchmark": {
+            "budgets": list(budgets),
+            "training_seed": training_seed,
+            "evaluation_seeds": list(evaluation_seeds),
+            "evaluation_episodes": evaluation_episodes,
+            "deterministic": deterministic,
+            "evaluation_split": evaluation_split,
+        },
+    }
+    canonical = json.dumps(
+        _stable_json_value(identity), sort_keys=True, separators=(",", ":"), allow_nan=False
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _atomic_write_text(path: Path, text: str) -> None:
@@ -195,7 +257,7 @@ def validate_budgets(
     Rules:
       - reject empty, zero, negative, non-integer, malformed comma-separated values
       - reject duplicates after normalization
-      - sort ascending for reproducibility
+      - canonicalize to ascending order; caller-provided ordering is not preserved
     """
     if raw_budgets is None:
         if allow_empty:
@@ -572,83 +634,125 @@ def _run_single_budget(
 ) -> LearningCurvePoint:
     """Run a single budget as a fresh training process from the same base configuration."""
     benchmark_dir = _budget_dir(output_base_dir, budget)
-    benchmark_dir.mkdir(parents=True, exist_ok=True)
+    benchmark_parent = benchmark_dir.parent
+    benchmark_parent.mkdir(parents=True, exist_ok=True)
+    if benchmark_dir.exists():
+        raise FileExistsError(
+            f"Completed artifact directory already exists for budget {budget}: {benchmark_dir}"
+        )
 
-    config_copy = config.model_copy(deep=True)
-    config_copy.name = f"ppo_budget_{budget}"
-    config_copy.seed = training_seed
-    config_copy.algorithm.parameters.pop("seed", None)
-    if config_copy.training is None:
-        raise ValueError("A training section is required to run the learning-curve benchmark.")
-    config_copy.training.total_timesteps = budget
-    config_copy.output_dir = benchmark_dir
-    config_copy.log_dir = benchmark_dir / "logs"
-
-    env = _make_env(config_copy.environment.name, **config_copy.environment.parameters)
-    trainer: Any = None
+    lock_path = benchmark_parent / f".budget_{budget}.lock"
     try:
-        trainer = _make_trainer(config_copy, env)
-        result = trainer.fit()
-        training_time_seconds = float(result.training_time_seconds)
-        trained_timesteps = int(trainer.algorithm.num_timesteps)
-        model = getattr(trainer.algorithm, "model", None)
-        device = str(
-            getattr(model, "device", config_copy.algorithm.parameters.get("device", "auto"))
-        )
-    finally:
-        if trainer is not None:
-            trainer.close()
-        else:
-            env.close()
-
-    model_path = result.final_model_path
-    if not model_path.exists():
-        raise FileNotFoundError(
-            f"Training budget {budget} did not create model artifact: {model_path}"
-        )
-    if not math.isfinite(training_time_seconds) or training_time_seconds < 0:
+        lock_descriptor = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except FileExistsError as exc:
         raise RuntimeError(
-            f"Invalid training duration for budget {budget}: {training_time_seconds}"
+            f"Budget {budget} is already reserved by another or interrupted benchmark: {lock_path}"
+        ) from exc
+
+    temporary_dir: Path | None = None
+    try:
+        os.close(lock_descriptor)
+        temporary_dir = Path(tempfile.mkdtemp(prefix=f".budget_{budget}.", dir=benchmark_parent))
+        config_copy = config.model_copy(deep=True)
+        config_copy.name = f"ppo_budget_{budget}"
+        config_copy.seed = training_seed
+        config_copy.algorithm.parameters.pop("seed", None)
+        if config_copy.training is None:
+            raise ValueError("A training section is required to run the learning-curve benchmark.")
+        config_copy.training.total_timesteps = budget
+        config_copy.output_dir = temporary_dir
+        config_copy.log_dir = temporary_dir / "logs"
+
+        env = _make_env(config_copy.environment.name, **config_copy.environment.parameters)
+        trainer: Any = None
+        try:
+            trainer = _make_trainer(config_copy, env)
+            result = trainer.fit()
+            training_time_seconds = float(result.training_time_seconds)
+            trained_timesteps = int(trainer.algorithm.num_timesteps)
+            model = getattr(trainer.algorithm, "model", None)
+            device = str(
+                getattr(model, "device", config_copy.algorithm.parameters.get("device", "auto"))
+            )
+        finally:
+            if trainer is not None:
+                trainer.close()
+            else:
+                env.close()
+
+        staged_model_path = Path(result.final_model_path)
+        if not staged_model_path.exists():
+            raise FileNotFoundError(
+                f"Training budget {budget} did not create model artifact: {staged_model_path}"
+            )
+        if not math.isfinite(training_time_seconds) or training_time_seconds < 0:
+            raise RuntimeError(
+                f"Invalid training duration for budget {budget}: {training_time_seconds}"
+            )
+
+        evaluation_env_kwargs = dict(config_copy.environment.parameters)
+        if evaluation_split == "custom":
+            evaluation_env_kwargs.pop("split", None)
+        else:
+            evaluation_env_kwargs["split"] = evaluation_split
+        descriptive, per_seed_summaries, cross_seed_statistics = _evaluate_model(
+            staged_model_path,
+            env_name=config_copy.environment.name,
+            env_kwargs=evaluation_env_kwargs,
+            evaluation_seeds=evaluation_seeds,
+            evaluation_episodes=evaluation_episodes,
+            deterministic=deterministic,
+            evaluation_split=evaluation_split,
         )
 
-    evaluation_env_kwargs = dict(config_copy.environment.parameters)
-    if evaluation_split == "custom":
-        evaluation_env_kwargs.pop("split", None)
-    else:
-        evaluation_env_kwargs["split"] = evaluation_split
-    descriptive, per_seed_summaries, cross_seed_statistics = _evaluate_model(
-        model_path,
-        env_name=config_copy.environment.name,
-        env_kwargs=evaluation_env_kwargs,
-        evaluation_seeds=evaluation_seeds,
-        evaluation_episodes=evaluation_episodes,
-        deterministic=deterministic,
-        evaluation_split=evaluation_split,
-    )
-
-    return LearningCurvePoint(
-        budget_timesteps=budget,
-        trained_timesteps=trained_timesteps,
-        success_rate=descriptive.success_rate,
-        collision_rate=descriptive.collision_rate,
-        timeout_rate=descriptive.timeout_rate,
-        mean_reward=descriptive.mean_reward,
-        std_reward=descriptive.std_reward,
-        mean_episode_length=descriptive.mean_episode_length,
-        training_time_seconds=training_time_seconds,
-        model_path=str(model_path),
-        training_seed=training_seed,
-        evaluation_seeds=list(evaluation_seeds),
-        evaluation_episodes=evaluation_episodes,
-        deterministic=deterministic,
-        algorithm=config_copy.algorithm.name,
-        environment=config_copy.environment.name,
-        evaluation_split=evaluation_split,
-        environment_fingerprint=environment_fingerprint,
-        device=device,
-        per_seed_summaries=per_seed_summaries,
-        cross_seed_statistics=cross_seed_statistics,
-    )
+        final_model_path = benchmark_dir / staged_model_path.relative_to(temporary_dir)
+        point = LearningCurvePoint(
+            budget_timesteps=budget,
+            trained_timesteps=trained_timesteps,
+            success_rate=descriptive.success_rate,
+            collision_rate=descriptive.collision_rate,
+            timeout_rate=descriptive.timeout_rate,
+            mean_reward=descriptive.mean_reward,
+            std_reward=descriptive.std_reward,
+            mean_episode_length=descriptive.mean_episode_length,
+            training_time_seconds=training_time_seconds,
+            model_path=str(final_model_path),
+            training_seed=training_seed,
+            evaluation_seeds=list(evaluation_seeds),
+            evaluation_episodes=evaluation_episodes,
+            deterministic=deterministic,
+            algorithm=config_copy.algorithm.name,
+            environment=config_copy.environment.name,
+            evaluation_split=evaluation_split,
+            environment_fingerprint=environment_fingerprint,
+            device=device,
+            per_seed_summaries=per_seed_summaries,
+            cross_seed_statistics=cross_seed_statistics,
+        )
+        budget_payload = {
+            "status": "completed",
+            "result": {
+                "budget_timesteps": point.budget_timesteps,
+                "trained_timesteps": point.trained_timesteps,
+                "descriptive_metrics": point.descriptive_metrics,
+                "training_metadata": point.training_metadata,
+                "per_seed_summaries": point.per_seed_summaries,
+                "cross_seed_statistics": point.cross_seed_statistics,
+            },
+        }
+        _validate_strict_json_payload(budget_payload)
+        _atomic_write_text(
+            temporary_dir / "budget_result.json",
+            json.dumps(budget_payload, indent=2, allow_nan=False) + "\n",
+        )
+        os.rename(temporary_dir, benchmark_dir)
+        return point
+    except Exception:
+        if temporary_dir is not None and temporary_dir.exists():
+            shutil.rmtree(temporary_dir)
+        raise
+    finally:
+        lock_path.unlink(missing_ok=True)
 
 
 def _write_json(result: LearningCurveBenchmarkResult) -> None:
@@ -666,12 +770,12 @@ def _csv_row(point: LearningCurvePoint) -> dict[str, str | float | int | None]:
     return {
         "budget_timesteps": point.budget_timesteps,
         "trained_timesteps": point.trained_timesteps,
-        "success_rate": point.success_rate,
-        "collision_rate": point.collision_rate,
-        "timeout_rate": point.timeout_rate,
-        "mean_reward": point.mean_reward,
-        "std_reward": point.std_reward,
-        "mean_episode_length": point.mean_episode_length,
+        "pooled_success_rate": point.success_rate,
+        "pooled_collision_rate": point.collision_rate,
+        "pooled_timeout_rate": point.timeout_rate,
+        "pooled_mean_reward": point.mean_reward,
+        "pooled_std_reward": point.std_reward,
+        "pooled_mean_episode_length": point.mean_episode_length,
         "training_time_seconds": point.training_time_seconds,
         "model_path": point.model_path,
         "training_seed": point.training_seed,
@@ -815,14 +919,45 @@ def run_learning_curve_benchmark(
     else:
         target_dir = Path(output_dir)
 
+    json_path = target_dir / "learning_curve_budget.json"
+    csv_path = target_dir / "learning_curve_budget.csv"
+    plot_output_path = target_dir / "learning_curve_budget.png"
+    plot_path = plot_output_path if plot else None
+    existing_outputs = [path for path in (json_path, csv_path, plot_output_path) if path.exists()]
+    existing_budgets = [
+        _budget_dir(target_dir, budget)
+        for budget in normalized
+        if _budget_dir(target_dir, budget).exists()
+    ]
+    if existing_outputs or existing_budgets:
+        existing = existing_outputs + existing_budgets
+        raise FileExistsError(
+            "Learning-curve output already exists; choose a fresh output directory: "
+            + ", ".join(str(path) for path in existing)
+        )
+
     target_dir.mkdir(parents=True, exist_ok=True)
     environment_configuration, environment_fingerprint = _environment_configuration(
         config, final_evaluation_split
     )
     runtime_provenance = _runtime_provenance()
-    json_path = target_dir / "learning_curve_budget.json"
-    csv_path = target_dir / "learning_curve_budget.csv"
-    plot_path = target_dir / "learning_curve_budget.png" if plot else None
+    runtime_provenance.update(
+        {
+            "configuration_fingerprint_sha256": _configuration_fingerprint(
+                config,
+                budgets=normalized,
+                training_seed=final_training_seed,
+                evaluation_seeds=final_eval_seeds,
+                evaluation_episodes=final_eval_episodes,
+                deterministic=final_deterministic,
+                evaluation_split=final_evaluation_split,
+            ),
+            "environment_fingerprint_sha256": environment_fingerprint,
+            "training_seed": final_training_seed,
+            "evaluation_seeds": list(final_eval_seeds),
+            "requested_budgets": list(normalized),
+        }
+    )
 
     bench_points: list[LearningCurvePoint] = []
     status = "completed"
