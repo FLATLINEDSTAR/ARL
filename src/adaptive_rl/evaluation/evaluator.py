@@ -22,6 +22,11 @@ from adaptive_rl.evaluation.metrics import (
     compute_trajectory_metrics,
 )
 from adaptive_rl.evaluation.statistics import MetricStatistics, summarize_seed_values
+from adaptive_rl.protocol.seed_schedule import (
+    LegacySeedError,
+    ScheduleValidationError,
+    derive_seed,
+)
 
 
 @dataclass(frozen=True)
@@ -236,6 +241,9 @@ class Evaluator:
         base_seed: Optional[int] = None,
         seeds: Optional[Sequence[int]] = None,
         split: Optional[str] = None,
+        research_mode: bool = False,
+        research_master_seed: Optional[int] = None,
+        research_domain: Optional[str] = None,
     ) -> EvaluationMetrics:
         """Execute evaluation rollouts and compute aggregated metrics.
 
@@ -246,7 +254,36 @@ class Evaluator:
             seeds: Explicit sequence of integer seeds to evaluate against.
             split: Benchmark split ('train' or 'test'). When supplied without seeds,
                 seeds are deterministically derived from the split partition.
+            research_mode: Require explicit preregistered episode seeds and reject legacy
+                sequential or split-based seed generation.
+            research_master_seed: Replicate master seed used to verify explicit seeds.
+            research_domain: `eval_pre` or `eval_post` domain for those explicit seeds.
         """
+        if research_mode and base_seed is not None:
+            raise LegacySeedError(
+                "research evaluation cannot use base_seed + episode; pass the explicit "
+                "preregistered schedule seeds"
+            )
+        if research_mode and (seeds is None or split is not None):
+            raise LegacySeedError(
+                "research evaluation requires explicit preregistered schedule seeds"
+            )
+        if research_mode:
+            if research_domain not in {"eval_pre", "eval_post"} or research_master_seed is None:
+                raise LegacySeedError(
+                    "research evaluation requires its replicate master seed and eval_pre/eval_post domain"
+                )
+            assert seeds is not None
+            if any(isinstance(seed, bool) or not isinstance(seed, int) for seed in seeds):
+                raise LegacySeedError("research schedule seeds must be integers")
+            expected_seeds = [
+                derive_seed(research_master_seed, research_domain, index)
+                for index in range(1, len(seeds) + 1)
+            ]
+            if list(seeds) != expected_seeds:
+                raise ScheduleValidationError(
+                    "research evaluation seeds do not match the selected preregistered domain"
+                )
         if split is not None:
             from adaptive_rl.evaluation.generalization import get_split_seeds, validate_split_seed
 

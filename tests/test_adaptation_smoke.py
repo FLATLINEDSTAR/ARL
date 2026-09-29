@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+import adaptive_rl.benchmarking.adaptation_runner as adaptation_runner_module
 from adaptive_rl.benchmarking.adaptation_artifacts import (
     write_adaptive_vs_fixed_artifacts,
     write_or_verify_study_manifest,
@@ -26,7 +27,11 @@ from adaptive_rl.benchmarking.adaptation_runner import (
 from adaptive_rl.cli import app
 from adaptive_rl.config import load_config
 from adaptive_rl.protocol.constants import TRAINING_SEEDS
-from adaptive_rl.protocol.seeds import frozen_schedule, schedule_fingerprint
+from adaptive_rl.protocol.seeds import (
+    ScheduleValidationError,
+    frozen_schedule,
+    schedule_fingerprint,
+)
 
 
 def test_cli_adaptation_smoke_runs_complete_protocol_and_writes_artifacts(tmp_path: Path) -> None:
@@ -153,6 +158,32 @@ def test_issue265_rejects_deterministic_ppo_rollout_before_creating_outputs(
             output_dir=output_dir,
             training_seeds=TRAINING_SEEDS[:1],
         )
+    assert not output_dir.exists()
+
+
+def test_invalid_seed_schedule_aborts_before_environment_or_output_creation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output_dir = tmp_path / "invalid-schedule"
+    config = load_config("configs/drone_distribution_shift.yaml")
+    evaluation = config.evaluation.model_copy(update={"deterministic": False}, deep=True)
+    config = config.model_copy(update={"evaluation": evaluation}, deep=True)
+
+    def invalid_schedule() -> object:
+        raise ScheduleValidationError("injected invalid schedule")
+
+    def forbidden_environment(*args: object, **kwargs: object) -> object:
+        raise AssertionError("environment creation must follow schedule validation")
+
+    monkeypatch.setattr(adaptation_runner_module, "frozen_schedule", invalid_schedule)
+    with pytest.raises(ScheduleValidationError, match="injected invalid schedule"):
+        run_adaptation_benchmark(
+            config,
+            output_dir=output_dir,
+            smoke=True,
+            environment_factory=forbidden_environment,  # type: ignore[arg-type]
+        )
+
     assert not output_dir.exists()
 
 

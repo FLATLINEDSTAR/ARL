@@ -61,7 +61,11 @@ from adaptive_rl.protocol.constants import (
 )
 from adaptive_rl.protocol.fork import fork_adaptive_and_fixed, model_fingerprint
 from adaptive_rl.protocol.recovery import compute_recovery
-from adaptive_rl.protocol.seeds import frozen_schedule, schedule_fingerprint
+from adaptive_rl.protocol.seed_schedule import (
+    SEED_SCHEDULE_VERSION,
+    frozen_schedule,
+    schedule_fingerprint,
+)
 from adaptive_rl.protocol.statistics import decide_family
 from adaptive_rl.training.trainer import get_trainer
 
@@ -111,8 +115,7 @@ def _repository_metadata() -> dict[str, Any]:
             "cuda_available": torch.cuda.is_available(),
             "cuda_device_count": torch.cuda.device_count(),
             "cuda_device_names": [
-                torch.cuda.get_device_name(index)
-                for index in range(torch.cuda.device_count())
+                torch.cuda.get_device_name(index) for index in range(torch.cuda.device_count())
             ],
         }
     )
@@ -272,13 +275,6 @@ def _run_evaluation_segment(
         )
         update_log = None
     return records
-
-
-def _tagged_sac_batch(batch: Any) -> Any:
-    """Attach protocol episode indices to each transition without changing JSON schema."""
-    from adaptive_rl.protocol.adaptation import UpdateBatch
-
-    raise TypeError("use _build_tagged_sac_batch with completed episode records")
 
 
 def _build_tagged_sac_batch(
@@ -524,11 +520,7 @@ def _preflight_incomplete_study_directory(
     if training_root.exists():
         expected_training_dirs = {f"seed_{seed}" for seed in training_seeds}
         for path in training_root.iterdir():
-            if (
-                path.name not in expected_training_dirs
-                or path.is_symlink()
-                or not path.is_dir()
-            ):
+            if path.name not in expected_training_dirs or path.is_symlink() or not path.is_dir():
                 raise ValueError(f"training state contains an unexpected entry: {path.name}")
 
 
@@ -587,7 +579,7 @@ def _run_replicate(
     training_seed: int,
     training_dir: Path,
     *,
-    schedule: dict[int, dict[str, list[int]]],
+    schedule: Mapping[int, Mapping[str, Sequence[int]]],
     smoke: bool,
     trainer_factory: TrainerFactory,
     environment_factory: EnvironmentFactory,
@@ -827,7 +819,9 @@ def run_adaptation_benchmark(
     if training_seeds is None:
         selected_seeds = [TRAINING_SEEDS[0]] if smoke else list(TRAINING_SEEDS)
     else:
-        selected_seeds = [int(seed) for seed in training_seeds]
+        selected_seeds = list(training_seeds)
+    if any(isinstance(seed, bool) or not isinstance(seed, int) for seed in selected_seeds):
+        raise ValueError("training_seeds must contain integers; bools and floats are rejected")
     if not selected_seeds or len(set(selected_seeds)) != len(selected_seeds):
         raise ValueError("training_seeds must be non-empty and unique")
     if not set(selected_seeds).issubset(TRAINING_SEEDS):
@@ -841,11 +835,15 @@ def run_adaptation_benchmark(
             raise ValueError("prereg-v1 requires one non-smoke attempt of all ten seeds in order")
         if output_dir is not None and Path(output_dir).is_absolute():
             raise ValueError("prereg-v1 artifact output_dir must be relative to the repository")
-        selected_output_dir = Path(output_dir) if output_dir is not None else Path(config.output_dir)
+        selected_output_dir = (
+            Path(output_dir) if output_dir is not None else Path(config.output_dir)
+        )
         try:
             selected_output_dir.resolve().relative_to(repository_root)
         except ValueError as exc:
-            raise ValueError("prereg-v1 artifact output_dir must stay inside the repository") from exc
+            raise ValueError(
+                "prereg-v1 artifact output_dir must stay inside the repository"
+            ) from exc
         if Path(config_arg).is_absolute():
             raise ValueError("prereg-v1 config path must be repository-relative")
         try:
@@ -860,10 +858,7 @@ def run_adaptation_benchmark(
             raise ValueError("prereg-v1 config differs from the frozen Issue #271 configuration")
         if card_sha != ISSUE271_TREATMENT_CARD_SHA256:
             raise ValueError("prereg-v1 Treatment Card differs from the frozen treatment")
-    if (
-        config.algorithm.name.strip().lower() == "ppo"
-        and config.evaluation.deterministic
-    ):
+    if config.algorithm.name.strip().lower() == "ppo" and config.evaluation.deterministic:
         raise ValueError(
             "PPO adaptation requires stochastic behavior-policy action sampling; "
             "deterministic mean actions are not valid on-policy rollout data"
@@ -906,9 +901,7 @@ def run_adaptation_benchmark(
             "artifact_schema_version": STUDY_ARTIFACT_SCHEMA_VERSION,
             "manifest_schema_version": STUDY_MANIFEST_SCHEMA_VERSION,
             "replicate_checkpoint_schema_version": REPLICATE_CHECKPOINT_SCHEMA_VERSION,
-            "study_config": config.model_dump(
-                mode="json", exclude={"output_dir", "log_dir"}
-            ),
+            "study_config": config.model_dump(mode="json", exclude={"output_dir", "log_dir"}),
             "canonical_config_sha256": compute_config_sha256(config),
             "treatment_card_sha256": card_sha,
             "protocol_version": benchmark.protocol_version,
@@ -918,6 +911,8 @@ def run_adaptation_benchmark(
                 "training_seeds": list(TRAINING_SEEDS),
                 "schedule": schedule,
                 "schedule_fingerprint": schedule_fp,
+                "schedule_validation": {"verified": True},
+                "schedule_module_version": SEED_SCHEDULE_VERSION,
             },
             "source_identity": runtime_identity,
             "runtime_determinism": determinism,
@@ -955,7 +950,9 @@ def run_adaptation_benchmark(
     else:
         for suffix in (*suffixes, "manifest.json"):
             if (target_dir / suffix).exists():
-                raise FileExistsError(f"refusing to overwrite existing artifact: {target_dir / suffix}")
+                raise FileExistsError(
+                    f"refusing to overwrite existing artifact: {target_dir / suffix}"
+                )
     training_root = target_dir / "training"
     state_root = target_dir / "replicate_state"
     if study_run_id is not None and state_root.exists() and not resume:
@@ -1180,6 +1177,10 @@ def run_adaptation_benchmark(
             target_dir / "manifest.json",
             run_id=study_run_id,
             command=command,
+            seed_schedule=schedule,
+            seed_schedule_fingerprint=schedule_fp,
+            seed_schedule_verified=True,
+            seed_schedule_module_version=SEED_SCHEDULE_VERSION,
         )
         assert study_hash is not None
         return _read_completed_study_artifact(

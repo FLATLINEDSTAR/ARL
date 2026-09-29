@@ -9,7 +9,7 @@ from typing import Any, Protocol, Sequence
 import numpy as np
 
 from adaptive_rl.protocol.constants import N_POST, N_UPDATE
-from adaptive_rl.protocol.seeds import derive_seed
+from adaptive_rl.protocol.seed_schedule import derive_seed
 
 
 @dataclass(frozen=True)
@@ -111,7 +111,9 @@ def build_update_batch(
             f"B{block_episode} can see only ordered completed episodes "
             f"1..{block_episode}; got {actual_indices}"
         )
-    expected_seeds = tuple(derive_seed(training_seed, "post", index) for index in expected_indices)
+    expected_seeds = tuple(
+        derive_seed(training_seed, "eval_post", index) for index in expected_indices
+    )
     actual_seeds = tuple(episode.seed for episode in completed_episodes)
     if actual_seeds != expected_seeds:
         raise ValueError("post-shift episode seeds do not match the preregistered schedule")

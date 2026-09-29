@@ -25,6 +25,7 @@ from adaptive_rl.protocol.constants import (
     ISSUE271_CONFIG_SHA256,
     ISSUE271_TREATMENT_CARD_SHA256,
 )
+from adaptive_rl.protocol.seeds import frozen_schedule, schedule_fingerprint
 
 
 def _artifact():
@@ -123,6 +124,38 @@ def test_manifest_hashes_all_artifacts_and_detects_tampering(tmp_path) -> None:
     )
     with pytest.raises(ValueError, match="checksum mismatch"):
         validate_study_manifest(manifest_path)
+
+
+def test_manifest_records_verified_seed_schedule_and_fingerprint(tmp_path) -> None:
+    schedule = frozen_schedule()
+    json_path, csv_path = write_adaptation_artifacts(
+        {
+            **_artifact(),
+            "schedule_fingerprint": schedule_fingerprint(schedule),
+        },
+        tmp_path,
+        stem="adaptive_vs_fixed",
+    )
+    manifest = write_study_manifest(
+        json_path,
+        csv_path,
+        tmp_path / "manifest.json",
+        run_id="seed-schedule-run",
+        command="adaptive-rl benchmark adaptation --study prereg-v1 --run-id seed-schedule-run",
+        seed_schedule=schedule,
+        seed_schedule_fingerprint=schedule_fingerprint(schedule),
+        seed_schedule_verified=True,
+        seed_schedule_module_version="1.0",
+    )
+
+    assert manifest["schema_version"] == "1.1"
+    assert manifest["seed_schedule"] == {
+        str(seed): {domain: list(values) for domain, values in domains.items()}
+        for seed, domains in schedule.items()
+    }
+    assert manifest["seed_schedule_fingerprint"] == schedule_fingerprint(schedule)
+    assert manifest["seed_schedule_validation"] == {"verified": True}
+    validate_study_manifest(tmp_path / "manifest.json")
 
 
 def test_manifest_rejects_unlisted_files_added_after_completion(tmp_path) -> None:
@@ -264,12 +297,15 @@ def test_replicate_checkpoint_is_terminal_hashed_and_tamper_evident(tmp_path) ->
         study_hash=study_hash,
         protocol_hash=protocol_hash,
     )
-    assert read_replicate_checkpoint(
-        checkpoint,
-        study_hash=study_hash,
-        protocol_hash=protocol_hash,
-        training_seed=31001,
-    )["failure_reason"] == "crash"
+    assert (
+        read_replicate_checkpoint(
+            checkpoint,
+            study_hash=study_hash,
+            protocol_hash=protocol_hash,
+            training_seed=31001,
+        )["failure_reason"]
+        == "crash"
+    )
     original = checkpoint.read_bytes()
     with pytest.raises(FileExistsError):
         write_replicate_checkpoint(
@@ -416,4 +452,5 @@ def test_resume_rejects_symlinked_study_manifest(tmp_path) -> None:
 def test_issue271_preregistered_inputs_match_frozen_hashes() -> None:
     config = load_config("configs/drone_distribution_shift.yaml")
     assert compute_config_sha256(config) == ISSUE271_CONFIG_SHA256
-    assert sha256_file("docs/research/TREATMENT_CARD.md") == ISSUE271_TREATMENT_CARD_SHA256
+    assert sha256_file("docs/research/TREATMENT_CARD_ISSUE271.md") == ISSUE271_TREATMENT_CARD_SHA256
+    assert sha256_file("docs/research/TREATMENT_CARD.md") == ISSUE273_TREATMENT_CARD_SHA256

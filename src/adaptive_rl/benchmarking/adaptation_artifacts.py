@@ -16,7 +16,8 @@ from typing import Any, Iterable, Mapping, Sequence, cast
 
 import numpy as np
 
-STUDY_MANIFEST_SCHEMA_VERSION = "1.0"
+STUDY_MANIFEST_SCHEMA_VERSION = "1.1"
+SUPPORTED_STUDY_MANIFEST_SCHEMA_VERSIONS = {"1.0", STUDY_MANIFEST_SCHEMA_VERSION}
 STUDY_ARTIFACT_SCHEMA_VERSION = "1.0"
 REPLICATE_CHECKPOINT_SCHEMA_VERSION = "1.1"
 
@@ -307,14 +308,22 @@ def write_or_verify_study_manifest(
             raise ValueError("cannot resume without a valid immutable study manifest") from exc
         if (
             not isinstance(existing, dict)
-            or existing.get("schema_version") != STUDY_MANIFEST_SCHEMA_VERSION
+            or existing.get("schema_version") not in SUPPORTED_STUDY_MANIFEST_SCHEMA_VERSIONS
             or not isinstance(existing.get("inputs"), dict)
         ):
             raise ValueError("study manifest has an invalid structure")
         actual_hash = hashlib.sha256(canonical_json_bytes(existing["inputs"])).hexdigest()
         if existing.get("study_hash") != actual_hash:
             raise ValueError("study manifest hash is invalid")
-        if actual_hash != expected["study_hash"]:
+        expected_hash = expected["study_hash"]
+        if existing.get("schema_version") == "1.0":
+            legacy_inputs = _plain(inputs)
+            protocol_constants = legacy_inputs.get("protocol_constants", {})
+            if isinstance(protocol_constants, dict):
+                protocol_constants.pop("schedule_validation", None)
+                protocol_constants.pop("schedule_module_version", None)
+            expected_hash = hashlib.sha256(canonical_json_bytes(legacy_inputs)).hexdigest()
+        if actual_hash != expected_hash:
             raise ValueError("resume study hash mismatch: execution inputs changed")
         return actual_hash
     if manifest_path.exists():
@@ -343,6 +352,10 @@ def write_study_manifest(
     *,
     run_id: str,
     command: str,
+    seed_schedule: Mapping[int, Mapping[str, Sequence[int]]] | None = None,
+    seed_schedule_fingerprint: str | None = None,
+    seed_schedule_verified: bool = False,
+    seed_schedule_module_version: str | None = None,
 ) -> dict[str, Any]:
     """Write an immutable provenance manifest for a completed study attempt."""
     artifact_path = Path(artifact_path)
@@ -371,8 +384,15 @@ def write_study_manifest(
             raise ValueError(f"run directory contains a symlinked artifact: {path.name}")
         if path.is_file() and path != manifest_path:
             artifact_files.append(path)
+    has_seed_schedule = seed_schedule is not None
+    if has_seed_schedule and (
+        not seed_schedule_fingerprint
+        or not seed_schedule_verified
+        or not seed_schedule_module_version
+    ):
+        raise ValueError("verified schedule, fingerprint, and module version are required together")
     manifest = {
-        "schema_version": STUDY_MANIFEST_SCHEMA_VERSION,
+        "schema_version": STUDY_MANIFEST_SCHEMA_VERSION if has_seed_schedule else "1.0",
         "study": "adaptive-vs-fixed/prereg-v1",
         "run_id": run_id,
         "commit_sha": commit,
@@ -399,6 +419,16 @@ def write_study_manifest(
             "cuda_device_count": _torch_cuda_device_count(),
             "protocol_seed_schedule": "SHA-256 derived seeds; see adaptive_vs_fixed.json",
         },
+        **(
+            {
+                "seed_schedule": seed_schedule,
+                "seed_schedule_fingerprint": seed_schedule_fingerprint,
+                "seed_schedule_validation": {"verified": True},
+                "seed_schedule_module_version": seed_schedule_module_version,
+            }
+            if has_seed_schedule
+            else {}
+        ),
         "artifacts": {
             str(path.relative_to(manifest_path.parent).as_posix()): sha256_file(path)
             for path in artifact_files
@@ -432,9 +462,30 @@ def validate_study_manifest(manifest_path: str | Path) -> None:
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     if (
         not isinstance(manifest, dict)
-        or manifest.get("schema_version") != STUDY_MANIFEST_SCHEMA_VERSION
+        or manifest.get("schema_version") not in SUPPORTED_STUDY_MANIFEST_SCHEMA_VERSIONS
     ):
         raise ValueError("unsupported or malformed study artifact manifest")
+    if manifest.get("schema_version") == STUDY_MANIFEST_SCHEMA_VERSION:
+        schedule = manifest.get("seed_schedule")
+        if (
+            not isinstance(schedule, dict)
+            or manifest.get("seed_schedule_validation") != {"verified": True}
+            or not isinstance(manifest.get("seed_schedule_module_version"), str)
+        ):
+            raise ValueError("manifest has incomplete seed schedule verification metadata")
+        try:
+            normalized_schedule = {
+                int(seed): {domain: values for domain, values in domains.items()}
+                for seed, domains in schedule.items()
+            }
+            from adaptive_rl.protocol.seed_schedule import schedule_fingerprint, validate_schedule
+
+            validate_schedule(normalized_schedule)
+            actual_fingerprint = schedule_fingerprint(normalized_schedule)
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise ValueError("manifest seed schedule is malformed") from exc
+        if manifest.get("seed_schedule_fingerprint") != actual_fingerprint:
+            raise ValueError("manifest seed schedule fingerprint does not match its schedule")
     artifacts = manifest.get("artifacts")
     if not isinstance(artifacts, dict) or not artifacts:
         raise ValueError("manifest must list at least one artifact checksum")
@@ -481,7 +532,10 @@ def validate_study_manifest(manifest_path: str | Path) -> None:
         if not isinstance(spec, dict) or not isinstance(spec.get("inputs"), dict):
             raise ValueError("pre-execution study manifest is malformed")
         actual_study_hash = hashlib.sha256(canonical_json_bytes(spec["inputs"])).hexdigest()
-        if spec.get("study_hash") != actual_study_hash or manifest.get("study_hash") != actual_study_hash:
+        if (
+            spec.get("study_hash") != actual_study_hash
+            or manifest.get("study_hash") != actual_study_hash
+        ):
             raise ValueError("study artifact manifest hash does not match its pre-execution spec")
 
 
@@ -583,7 +637,10 @@ def read_replicate_checkpoint(
         checkpoint_path.parent.parent,
         envelope.get("artifact_integrity"),
     )
-    if envelope.get("replicate_id") != training_seed or replicate.get("training_seed") != training_seed:
+    if (
+        envelope.get("replicate_id") != training_seed
+        or replicate.get("training_seed") != training_seed
+    ):
         raise ValueError("replicate checkpoint identity mismatch")
     result = replicate
     if result.get("status") not in {"completed", "failed"}:
@@ -623,9 +680,7 @@ def _snapshot_artifact_directories(
                 if path.is_file():
                     relative_path = path.resolve().relative_to(root).as_posix()
                     files[relative_path] = sha256_file(path)
-        snapshots.append(
-            {"path": relative_directory, "exists": exists, "files": files}
-        )
+        snapshots.append({"path": relative_directory, "exists": exists, "files": files})
     return snapshots
 
 
@@ -676,9 +731,10 @@ def _validate_checkpoint_artifacts(artifact_root: str | Path, snapshots: Any) ->
                 or any(character not in "0123456789abcdef" for character in expected_hash)
             ):
                 raise ValueError("checkpoint artifact file record is invalid")
-            if relative.parts[: len(Path(relative_directory).parts)] != Path(
-                relative_directory
-            ).parts:
+            if (
+                relative.parts[: len(Path(relative_directory).parts)]
+                != Path(relative_directory).parts
+            ):
                 raise ValueError("checkpoint artifact file is outside its recorded directory")
             path = root / relative
             try:

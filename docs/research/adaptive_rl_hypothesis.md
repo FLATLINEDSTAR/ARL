@@ -328,7 +328,7 @@ Step 8 — CAUSAL RECOVERY MEASUREMENT
 
 ## 14. Seed Protocol
 
-Executable implementation: `src/adaptive_rl/protocol/seeds.py`; tests: `tests/test_protocol_seed_schedule.py`.
+Executable implementation: `src/adaptive_rl/protocol/seed_schedule.py`; tests: `tests/test_protocol_seed_schedule.py`. The domain API names `eval_pre` and `eval_post` map to the frozen payload tokens `pre` and `post`; `train` is the unchanged replicate master seed. Serialized schedule keys and the preregistered fingerprint remain unchanged. See [`SEED_POLICY.md`](SEED_POLICY.md) for the API mapping, shock-window assignment, validation, manifest fields, and worked example.
 
 ### 14.1 Training seeds (replicate identity)
 
@@ -349,7 +349,7 @@ value    = int.from_bytes(digest[:4], byteorder="big", signed=False) & 0x7FFFFFF
 ```
 
 * `training_seed` ∈ `TRAINING_SEEDS` (any other value raises).
-* `phase` ∈ `"pre"`, `"post"`, `"update"`.
+* Derivation payload tokens are `"pre"`, `"post"`, and `"update"`. The API accepts `"eval_pre"` and `"eval_post"` as descriptive aliases for the first two tokens; `"train"` at index 0 returns the unchanged `training_seed`.
 * Index domains (frozen, 1-based for episodes, 0-based for blocks): `pre`: 1..15; `post`: 1..15; `update`: 0..9.
 * Range: `0 <= value <= SEED_VALUE_MAX` where `SEED_VALUE_MAX = 0x7FFFFFFF` — valid for every RNG the repo seeds.
 * Example regression value: `derive_seed(31001, "pre", 1) = 1280372827`.
@@ -374,7 +374,7 @@ The research artifact and each replicate record this fingerprint, shared by both
 
 ### 14.4 RNG initialization and train/test disjointness
 
-Every pre/post episode reset uses `reset(seed = derived_value)` and every update block uses its corresponding derived update seed `[SMOKE-VALIDATED]`. Training-side seeding remains `random.seed` / `np.random.seed` / `torch.manual_seed` / CUDA seeds in `trainer.py`. Disjointness of the derived schedule from training seeds and config pools is enforced by `validate_schedule()` (§14.2). Determinism is **not** claimed across hardware/library versions (§25).
+Every pre/post episode reset uses `reset(seed = derived_value)` and every update block uses its corresponding derived update seed `[SMOKE-VALIDATED]`. Training-side seeding remains `random.seed` / `np.random.seed` / `torch.manual_seed` / CUDA seeds in `trainer.py`. Disjointness of the derived schedule from training seeds and config pools is enforced by `validate_schedule()` (§14.2). Determinism is **not** claimed across hardware/library versions (§25). Research evaluation rejects the generic sequential `base_seed + episode` fallback; see [`SEED_POLICY.md`](SEED_POLICY.md).
 
 ## 15. Training Budgets (Pinned)
 
@@ -557,7 +557,7 @@ Per replicate × arm: training seed, all three phase-seed lists used, schedule f
 | Concern | Module | Tests |
 |---|---|---|
 | Frozen constants (`PROTOCOL_VERSION`, seeds, `K_pre`, `H`, `N_update`, `MIN_VALID_N`, `ALPHA`, bootstrap config, cells, pools) | `src/adaptive_rl/protocol/constants.py` | `tests/test_protocol_seed_schedule.py`, `tests/test_protocol_doc_sync.py` |
-| Seed derivation, schedule, validation, fingerprint | `src/adaptive_rl/protocol/seeds.py` | `tests/test_protocol_seed_schedule.py` (incl. cross-process/`PYTHONHASHSEED` independence via subprocess) |
+| Seed derivation, schedule, validation, fingerprint | `src/adaptive_rl/protocol/seed_schedule.py` | `tests/test_protocol_seed_schedule.py` (incl. cross-process/`PYTHONHASHSEED` independence via subprocess) |
 | Recovery endpoint, statuses, edge cases, secondary endpoints | `src/adaptive_rl/protocol/recovery.py` | `tests/test_protocol_recovery.py` (all §7 cases) |
 | Primary t-test, t CI, $d_z$, sensitivities, Holm, IUT decision, imputation | `src/adaptive_rl/protocol/statistics.py` | `tests/test_protocol_statistics.py` |
 | Document ↔ code agreement (versions, literals, SHA, bans on superseded claims) | this document | `tests/test_protocol_doc_sync.py` |

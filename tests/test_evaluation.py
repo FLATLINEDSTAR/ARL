@@ -23,6 +23,7 @@ from adaptive_rl.evaluation.statistics import (
     summarize_descriptive_episodes,
     summarize_seed_values,
 )
+from adaptive_rl.protocol.seeds import LegacySeedError, ScheduleValidationError, derive_seed
 
 
 class _SeedOutcomeEnv(gym.Env):
@@ -78,6 +79,32 @@ class _ZeroDronePolicy:
         self, observation: np.ndarray, deterministic: bool = True
     ) -> tuple[np.ndarray, None]:
         return np.zeros(3, dtype=np.float32), None
+
+
+def test_research_evaluation_rejects_legacy_sequential_seeds() -> None:
+    evaluator = Evaluator(algorithm=_ZeroPolicy(), env=_SeedOutcomeEnv())  # type: ignore[arg-type]
+
+    with pytest.raises(LegacySeedError, match=r"base_seed \+ episode"):
+        evaluator.evaluate(num_episodes=2, base_seed=31001, research_mode=True)
+
+    with pytest.raises(LegacySeedError, match="explicit preregistered"):
+        evaluator.evaluate(num_episodes=2, research_mode=True)
+
+    with pytest.raises(ScheduleValidationError, match="do not match"):
+        evaluator.evaluate(
+            seeds=[31001],
+            research_mode=True,
+            research_master_seed=31001,
+            research_domain="eval_pre",
+        )
+
+    result = evaluator.evaluate(
+        seeds=[derive_seed(31001, "eval_pre", 1)],
+        research_mode=True,
+        research_master_seed=31001,
+        research_domain="eval_pre",
+    )
+    assert result.episodes == 1
 
 
 def test_evaluator_deterministic_evaluation(tmp_path: Path) -> None:

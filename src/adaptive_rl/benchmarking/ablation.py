@@ -364,6 +364,8 @@ def run_reward_ablation_experiment(
         else:
             resolved_eval_freq = max(100, timesteps // 5)
 
+    # This legacy reward-ablation utility is exploratory and outside the
+    # preregistered Issue #271 adaptation research path.
     eval_seed = seed + 1000
     results: List[Dict[str, Any]] = []
 
