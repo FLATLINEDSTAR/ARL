@@ -24,8 +24,7 @@ from adaptive_rl.config import (
 )
 from adaptive_rl.manifest import (
     ExperimentManifest,
-    ManifestError,
-    generate_manifest,
+    create_manifest,
     load_manifest,
     save_manifest,
 )
@@ -52,12 +51,11 @@ __all__ = [
     "EvaluationConfig",
     "ExperimentConfig",
     "ExperimentManifest",
-    "ManifestError",
     "OutcomePolicy",
     "TrainingConfig",
     "compute_rate",
+    "create_manifest",
     "extract_episode_metrics",
-    "generate_manifest",
     "load_config",
     "load_manifest",
     "save_config",

@@ -1,16 +1,14 @@
-"""Experiment provenance and environment manifest system for AdaptiveRL.
+"""Experiment manifest generation, schema validation, and artifact provenance (Issue #248).
 
-Implements typed Pydantic models and utility functions for capturing, serializing,
-and inspecting experiment metadata, including Git provenance, host system info,
-dependency versions, hardware telemetry, effective configuration, and artifact
-integrity checksums (SHA-256).
+Captures software versions, host metadata, Git commit and dirty status, hardware
+telemetry, deserialized experiment configuration, execution duration, and SHA-256
+integrity checksums of generated model weights and evaluation reports.
 """
 
 from __future__ import annotations
 
 import hashlib
 import importlib.metadata
-import json
 import logging
 import os
 import platform
@@ -18,384 +16,159 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Union
+from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
-
-from adaptive_rl.config import ExperimentConfig, compute_config_sha256
+from pydantic import BaseModel, ConfigDict, Field
 
 logger = logging.getLogger(__name__)
 
-# Standard dependencies tracked in software provenance
-CORE_PACKAGES = (
-    "adaptive_rl",
-    "torch",
-    "stable_baselines3",
-    "gymnasium",
-    "numpy",
-    "typer",
-    "pydantic",
-)
 
-
-class ManifestError(Exception):
-    """Raised for manifest generation, validation, or loading failures."""
-
-    pass
-
-
-class GitMetadata(BaseModel):
-    """Git version control provenance."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    git_commit: str = Field("unknown", description="Git commit SHA or 'unknown'")
-    git_branch: Optional[str] = Field(None, description="Active branch name, 'detached', or None")
-    git_dirty: bool = Field(False, description="Whether uncommitted changes exist in working tree")
-
-
-class HostMetadata(BaseModel):
-    """Host operating system and Python runtime environment."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    os_name: str = Field(..., description="Operating system name, e.g. 'Linux'")
-    os_version: str = Field(..., description="Operating system release/kernel version")
-    python_version: str = Field(..., description="Python interpreter version")
-    architecture: str = Field(..., description="CPU architecture, e.g. 'x86_64'")
-
-
-class PackageMetadata(BaseModel):
-    """Installed versions of key dependencies."""
-
-    model_config = ConfigDict(extra="allow")
-
-    adaptive_rl: Optional[str] = Field(None, description="AdaptiveRL version")
-    torch: Optional[str] = Field(None, description="PyTorch version")
-    stable_baselines3: Optional[str] = Field(None, description="Stable-Baselines3 version")
-    gymnasium: Optional[str] = Field(None, description="Gymnasium version")
-    numpy: Optional[str] = Field(None, description="NumPy version")
-    typer: Optional[str] = Field(None, description="Typer version")
-    pydantic: Optional[str] = Field(None, description="Pydantic version")
-
-
-class HardwareMetadata(BaseModel):
-    """Compute hardware telemetry."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    device: str = Field("cpu", description="Compute device utilized ('cpu' or 'cuda')")
-    cuda_device_name: Optional[str] = Field(
-        None, description="CUDA GPU model name if GPU was utilized"
-    )
-    cpu_count: Optional[int] = Field(None, description="Number of logical CPU cores")
-
-
-class ExecutionMetadata(BaseModel):
-    """Execution lifecycle and invocation details."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    started_at: str = Field(..., description="ISO 8601 UTC timestamp of execution start")
-    finished_at: Optional[str] = Field(
-        None, description="ISO 8601 UTC timestamp of execution completion"
-    )
-    duration_seconds: Optional[float] = Field(
-        None, ge=0.0, description="Total execution duration in seconds"
-    )
-    command: Optional[str] = Field(None, description="Sanitized invocation command")
-
-
-class ArtifactRecord(BaseModel):
-    """Provenance and cryptographic hash of an output artifact."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    path: str = Field(..., description="Relative path to artifact within workspace")
-    sha256: str = Field(..., description="SHA-256 integrity checksum hex digest")
-    size_bytes: int = Field(..., ge=0, description="Artifact file size in bytes")
-    artifact_type: str = Field(
-        "unknown", description="Category: 'model', 'metadata', 'checkpoint', etc."
-    )
-
-
-class ExperimentMetadata(BaseModel):
-    """High-level experiment identifiers and complete effective configuration."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    name: str = Field(..., description="Experiment name")
-    algorithm: str = Field(..., description="Algorithm name, e.g. 'ppo' or 'sac'")
-    seed: int = Field(..., description="Random seed")
-    training_budget: Optional[int] = Field(
-        None, description="Total timesteps budgeted for training"
-    )
-    environment_name: str = Field(..., description="Registered environment name")
-    environment_parameters: Dict[str, Any] = Field(
-        default_factory=dict, description="Environment parameters"
-    )
-    config: Dict[str, Any] = Field(
-        ..., description="Complete deserialized ExperimentConfig dictionary"
-    )
-    config_sha256: Optional[str] = Field(
-        None, description="Deterministic SHA-256 fingerprint of the configuration"
-    )
-
-
-class ExperimentManifest(BaseModel):
-    """Complete machine-readable experiment manifest recording environment provenance."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    manifest_version: str = Field("1.0.0", description="Schema version of this manifest")
-    experiment_name: str = Field(..., description="Experiment identifier")
-    git: GitMetadata = Field(default_factory=GitMetadata)
-    host: HostMetadata
-    packages: PackageMetadata
-    hardware: HardwareMetadata
-    execution: ExecutionMetadata
-    experiment: ExperimentMetadata
-    artifacts: List[ArtifactRecord] = Field(
-        default_factory=list, description="Output artifacts and SHA-256 checksums"
-    )
-
-    @property
-    def git_commit(self) -> str:
-        """Convenience property for Git commit hash."""
-        return self.git.git_commit
-
-    @property
-    def git_branch(self) -> Optional[str]:
-        """Convenience property for Git branch name."""
-        return self.git.git_branch
-
-    @property
-    def git_dirty(self) -> bool:
-        """Convenience property for Git dirty working tree flag."""
-        return self.git.git_dirty
-
-    @property
-    def os_name(self) -> str:
-        """Convenience property for operating system name."""
-        return self.host.os_name
-
-    @property
-    def python_version(self) -> str:
-        """Convenience property for Python interpreter version."""
-        return self.host.python_version
-
-    @property
-    def seed(self) -> int:
-        """Convenience property for experiment seed."""
-        return self.experiment.seed
-
-    @property
-    def algorithm(self) -> str:
-        """Convenience property for experiment algorithm name."""
-        return self.experiment.algorithm
-
-    def save(self, path: Union[str, Path], atomic: bool = True) -> Path:
-        """Save this manifest to a JSON file."""
-        return save_manifest(self, path, atomic=atomic)
-
-    @classmethod
-    def load(cls, path: Union[str, Path]) -> ExperimentManifest:
-        """Load and validate an experiment manifest from a JSON file."""
-        return load_manifest(path)
-
-
-def compute_file_sha256(file_path: Union[Path, str], chunk_size: int = 65536) -> str:
-    """Compute the SHA-256 checksum of a file using streaming reads."""
-    target = Path(file_path)
-    if not target.is_file():
-        raise FileNotFoundError(f"File not found for checksum calculation: {target}")
+def compute_sha256(file_path: Path | str) -> str:
+    """Compute deterministic SHA-256 hex digest of a file in chunks."""
+    path = Path(file_path)
+    if not path.is_file():
+        raise FileNotFoundError(f"File not found for checksum calculation: {path}")
 
     hasher = hashlib.sha256()
-    with open(target, "rb") as f:
-        while True:
-            chunk = f.read(chunk_size)
-            if not chunk:
-                break
+    with open(path, "rb") as f:
+        while chunk := f.read(65536):
             hasher.update(chunk)
     return hasher.hexdigest()
 
 
-def sanitize_path(path: Union[Path, str], base_dir: Optional[Path] = None) -> str:
-    """Sanitize a file path to avoid leaking absolute home directory paths."""
-    p = Path(path)
+class GitMetadata(BaseModel):
+    """Git repository metadata at the time of experiment execution."""
 
-    # 1. If base_dir is supplied, attempt relative path to base_dir
-    if base_dir is not None:
-        try:
-            return p.resolve().relative_to(base_dir.resolve()).as_posix()
-        except ValueError:
-            pass
+    model_config = ConfigDict(extra="forbid")
 
-    # 2. Attempt relative path to current working directory
-    try:
-        return p.resolve().relative_to(Path.cwd().resolve()).as_posix()
-    except ValueError:
-        pass
-
-    # 3. If within user home directory, mask prefix with '~/'
-    try:
-        home = Path.home().resolve()
-        if str(home) not in ("/", "") and p.resolve().is_relative_to(home):
-            rel = p.resolve().relative_to(home)
-            return f"~/{rel.as_posix()}"
-    except (ValueError, AttributeError):
-        pass
-
-    # 4. Fallback to filename
-    return p.name
+    git_commit: str = Field(..., description="Git commit SHA-1 or 'unknown'")
+    git_branch: str = Field(..., description="Git branch name or 'unknown'")
+    git_dirty: bool = Field(False, description="True if uncommitted changes were present")
 
 
-def sanitize_command(args: Optional[Union[str, Sequence[str]]] = None) -> str:
-    """Sanitize CLI command string, redacting potential secret arguments and absolute home paths."""
-    if args is None:
-        tokens = list(sys.argv)
-    elif isinstance(args, str):
-        tokens = args.split()
-    else:
-        tokens = list(args)
+class HostSystem(BaseModel):
+    """Operating system and Python runtime environment."""
 
-    if not tokens:
-        return ""
+    model_config = ConfigDict(extra="forbid")
 
-    sanitized_tokens: List[str] = []
-    redact_next = False
-    sensitive_flags = {
-        "--api-key",
-        "--token",
-        "--password",
-        "--secret",
-        "--auth",
-        "--key",
-        "-k",
-    }
-
-    for token in tokens:
-        if redact_next:
-            sanitized_tokens.append("***")
-            redact_next = False
-            continue
-
-        lower = token.lower()
-        if any(lower == flag or lower.startswith(f"{flag}=") for flag in sensitive_flags):
-            if "=" in token:
-                flag_name, _ = token.split("=", 1)
-                sanitized_tokens.append(f"{flag_name}=***")
-            else:
-                sanitized_tokens.append(token)
-                redact_next = True
-            continue
-
-        # Redact token-like patterns (e.g. ghp_..., sk-...)
-        if any(token.startswith(prefix) for prefix in ("ghp_", "sk-", "gho_", "ghu_")):
-            sanitized_tokens.append("***")
-            continue
-
-        # Sanitize home directory from paths in arguments
-        try:
-            home = str(Path.home())
-            if home not in ("/", "") and home in token:
-                token = token.replace(home, "~")
-        except Exception:
-            pass
-
-        sanitized_tokens.append(token)
-
-    return " ".join(sanitized_tokens)
+    os_name: str = Field(..., description="Operating system name (e.g. Linux, Darwin)")
+    os_version: str = Field(..., description="OS release version")
+    python_version: str = Field(..., description="Python interpreter version")
+    architecture: str = Field(..., description="Hardware machine architecture")
 
 
-def sanitize_config_dict(data: Any) -> Any:
-    """Recursively sanitize configuration dictionaries to ensure no secrets or private home paths leak."""
-    if isinstance(data, dict):
-        sanitized = {}
-        for k, v in data.items():
-            k_lower = str(k).lower()
-            if any(
-                term in k_lower
-                for term in ("key", "token", "secret", "password", "auth", "credential")
-            ):
-                sanitized[k] = "***"
-            else:
-                sanitized[k] = sanitize_config_dict(v)
-        return sanitized
-    elif isinstance(data, list):
-        return [sanitize_config_dict(item) for item in data]
-    elif isinstance(data, Path):
-        return sanitize_path(data)
-    elif isinstance(data, str):
-        try:
-            home = str(Path.home())
-            if home not in ("/", "") and home in data:
-                return data.replace(home, "~")
-        except Exception:
-            pass
-        return data
-    return data
+class SoftwarePackages(BaseModel):
+    """Pinned library package versions for reproducibility."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    adaptive_rl: str = Field(..., description="adaptive-rl package version")
+    torch: str = Field(..., description="PyTorch version")
+    stable_baselines3: str = Field(..., description="Stable-Baselines3 version")
+    gymnasium: str = Field(..., description="Farama Gymnasium version")
+    numpy: str = Field(..., description="NumPy version")
+    typer: str = Field(..., description="Typer CLI version")
+    pydantic: str = Field(..., description="Pydantic version")
 
 
-def get_git_metadata(repo_path: Optional[Path] = None) -> GitMetadata:
-    """Query Git version control provenance safely without raising exceptions."""
-    cwd = str(repo_path) if repo_path is not None else str(Path.cwd())
+class HardwareTelemetry(BaseModel):
+    """Compute hardware and acceleration device information."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    device: str = Field("cpu", description="Primary compute device utilized (e.g. cpu or cuda)")
+    gpu_name: Optional[str] = Field(None, description="GPU model name if available")
+    gpu_count: int = Field(0, ge=0, description="Number of detected CUDA GPUs")
+    cpu_count: int = Field(1, gt=0, description="Logical CPU core count")
+
+
+class ExecutionMetadata(BaseModel):
+    """Temporal and command invocation metadata."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    started_at: str = Field(..., description="ISO 8601 UTC start timestamp")
+    finished_at: str = Field(..., description="ISO 8601 UTC completion timestamp")
+    duration_seconds: float = Field(..., ge=0.0, description="Total wall-clock duration")
+    training_time_seconds: Optional[float] = Field(
+        None, ge=0.0, description="Exclusive interaction/training duration"
+    )
+    command: List[str] = Field(default_factory=list, description="CLI invocation arguments")
+
+
+class ArtifactProvenance(BaseModel):
+    """Checksum and location metadata for an experiment artifact."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    path: str = Field(..., description="Filesystem path of the artifact")
+    sha256: str = Field(..., description="SHA-256 cryptographic checksum")
+    size_bytes: int = Field(..., ge=0, description="Artifact size in bytes")
+
+
+class ExperimentManifest(BaseModel):
+    """Comprehensive experiment manifest capturing provenance and environment metadata."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    manifest_version: str = Field("1.0", description="Manifest schema version")
+    experiment_name: str = Field(..., description="Name identifier of the experiment")
+    git: GitMetadata
+    host: HostSystem
+    packages: SoftwarePackages
+    hardware: HardwareTelemetry
+    execution: ExecutionMetadata
+    config: Dict[str, Any] = Field(..., description="Sanitized experiment configuration")
+    artifacts: Dict[str, ArtifactProvenance] = Field(
+        default_factory=dict, description="Generated artifacts with checksums"
+    )
+
+
+def collect_git_metadata() -> GitMetadata:
+    """Safely query Git repository state with graceful fallback for non-git environments."""
     commit = "unknown"
-    branch = None
+    branch = "unknown"
     dirty = False
 
     try:
-        # Check commit hash
-        proc = subprocess.run(
+        res_commit = subprocess.run(
             ["git", "rev-parse", "HEAD"],
-            cwd=cwd,
             capture_output=True,
             text=True,
             timeout=5,
             check=False,
         )
-        if proc.returncode == 0 and proc.stdout.strip():
-            commit = proc.stdout.strip()
-        else:
-            return GitMetadata(git_commit="unknown", git_branch=None, git_dirty=False)
+        if res_commit.returncode == 0 and res_commit.stdout.strip():
+            commit = res_commit.stdout.strip()
 
-        # Check branch name
-        proc_b = subprocess.run(
-            ["git", "symbolic-ref", "--short", "-q", "HEAD"],
-            cwd=cwd,
+        res_branch = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
             capture_output=True,
             text=True,
             timeout=5,
             check=False,
         )
-        if proc_b.returncode == 0 and proc_b.stdout.strip():
-            branch = proc_b.stdout.strip()
-        else:
-            branch = "detached"
+        if res_branch.returncode == 0 and res_branch.stdout.strip():
+            branch = res_branch.stdout.strip()
 
-        # Check dirty working tree
-        proc_d = subprocess.run(
+        res_status = subprocess.run(
             ["git", "status", "--porcelain"],
-            cwd=cwd,
             capture_output=True,
             text=True,
             timeout=5,
             check=False,
         )
-        if proc_d.returncode == 0:
-            dirty = bool(proc_d.stdout.strip())
-
-    except (FileNotFoundError, subprocess.TimeoutExpired, PermissionError, Exception):
-        commit = "unknown"
-        branch = None
-        dirty = False
+        if res_status.returncode == 0:
+            dirty = bool(res_status.stdout.strip())
+    except (FileNotFoundError, subprocess.SubprocessError, Exception) as exc:
+        logger.debug("Failed to query git metadata: %s", exc)
 
     return GitMetadata(git_commit=commit, git_branch=branch, git_dirty=dirty)
 
 
-def get_host_metadata() -> HostMetadata:
-    """Collect host operating system and Python interpreter runtime metadata."""
-    return HostMetadata(
+def collect_host_system() -> HostSystem:
+    """Collect host operating system and Python environment information."""
+    return HostSystem(
         os_name=platform.system(),
         os_version=platform.release(),
         python_version=platform.python_version(),
@@ -403,265 +176,136 @@ def get_host_metadata() -> HostMetadata:
     )
 
 
-def get_package_metadata(extra_packages: Optional[Sequence[str]] = None) -> PackageMetadata:
-    """Retrieve installed versions of core project dependencies via importlib.metadata."""
-    targets = list(CORE_PACKAGES)
-    if extra_packages:
-        targets.extend(extra_packages)
+def _safe_package_version(pkg_name: str) -> str:
+    """Query installed package version with fallback."""
+    try:
+        return importlib.metadata.version(pkg_name)
+    except Exception:
+        pass
 
-    versions: Dict[str, Optional[str]] = {}
-    for pkg in targets:
-        ver: Optional[str] = None
-        # Try both underscored and hyphenated distribution names
-        candidate_names = [pkg, pkg.replace("_", "-")]
-        for name in candidate_names:
-            try:
-                ver = importlib.metadata.version(name)
-                break
-            except importlib.metadata.PackageNotFoundError:
-                pass
-            except Exception:
-                pass
+    try:
+        mod = sys.modules.get(pkg_name)
+        if mod and hasattr(mod, "__version__"):
+            return str(mod.__version__)
+    except Exception:
+        pass
 
-        if ver is None and pkg == "adaptive_rl":
-            try:
-                import adaptive_rl
-
-                ver = getattr(adaptive_rl, "__version__", None)
-            except Exception:
-                pass
-
-        versions[pkg] = ver
-
-    return PackageMetadata(**versions)
+    return "unknown"
 
 
-def get_hardware_metadata(device: Optional[str] = None) -> HardwareMetadata:
-    """Determine compute device and query CUDA telemetry if actively used."""
-    dev_str = str(device).lower() if device is not None else "cpu"
-    cuda_name: Optional[str] = None
+def collect_software_packages() -> SoftwarePackages:
+    """Collect exact pinned versions of critical software packages."""
+    return SoftwarePackages(
+        adaptive_rl=_safe_package_version("adaptive-rl"),
+        torch=_safe_package_version("torch"),
+        stable_baselines3=_safe_package_version("stable-baselines3"),
+        gymnasium=_safe_package_version("gymnasium"),
+        numpy=_safe_package_version("numpy"),
+        typer=_safe_package_version("typer"),
+        pydantic=_safe_package_version("pydantic"),
+    )
 
-    if "cuda" in dev_str:
-        try:
-            import torch
 
-            if torch.cuda.is_available():
-                cuda_idx = 0
-                if ":" in dev_str:
-                    try:
-                        cuda_idx = int(dev_str.split(":")[-1])
-                    except ValueError:
-                        cuda_idx = 0
-                cuda_name = torch.cuda.get_device_name(cuda_idx)
-            else:
-                dev_str = "cpu"
-        except Exception:
-            dev_str = "cpu"
+def collect_hardware_telemetry(device: Optional[str] = None) -> HardwareTelemetry:
+    """Collect hardware compute capabilities (CPU cores and GPU devices)."""
+    cpu_count = os.cpu_count() or 1
+    gpu_name: Optional[str] = None
+    gpu_count = 0
+    dev_str = device or "cpu"
 
-    return HardwareMetadata(
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            gpu_count = torch.cuda.device_count()
+            gpu_name = torch.cuda.get_device_name(0)
+            if not device:
+                dev_str = "cuda"
+    except Exception:
+        pass
+
+    return HardwareTelemetry(
         device=dev_str,
-        cuda_device_name=cuda_name,
-        cpu_count=os.cpu_count(),
+        gpu_name=gpu_name,
+        gpu_count=gpu_count,
+        cpu_count=cpu_count,
     )
 
 
-def create_artifact_record(
-    file_path: Union[Path, str],
-    artifact_type: str = "unknown",
-    base_dir: Optional[Path] = None,
-) -> ArtifactRecord:
-    """Generate an ArtifactRecord with path, SHA-256 checksum, and file size."""
-    p = Path(file_path)
-    if not p.is_file():
-        raise FileNotFoundError(f"Artifact not found: {p}")
-
-    sha256 = compute_file_sha256(p)
-    size_bytes = p.stat().st_size
-    rel_path = sanitize_path(p, base_dir=base_dir)
-
-    return ArtifactRecord(
-        path=rel_path,
-        sha256=sha256,
-        size_bytes=size_bytes,
-        artifact_type=artifact_type,
-    )
-
-
-def generate_manifest(
-    config: ExperimentConfig,
-    started_at: Union[float, datetime],
-    finished_at: Optional[Union[float, datetime]] = None,
-    artifacts: Optional[Sequence[Union[Path, str, ArtifactRecord]]] = None,
+def create_manifest(
+    experiment_name: str,
+    config_dict: Dict[str, Any],
+    started_at: datetime | float,
+    finished_at: datetime | float,
+    artifacts: Optional[Dict[str, Path | str]] = None,
+    training_time_seconds: Optional[float] = None,
+    command: Optional[List[str]] = None,
     device: Optional[str] = None,
-    command: Optional[Union[str, Sequence[str]]] = None,
-    base_dir: Optional[Path] = None,
-    repo_path: Optional[Path] = None,
 ) -> ExperimentManifest:
-    """Construct an ExperimentManifest capturing complete environment, code, and config provenance."""
-    # 1. Timestamps and duration
+    """Create a validated ExperimentManifest instance from execution parameters."""
     if isinstance(started_at, (int, float)):
         start_dt = datetime.fromtimestamp(started_at, tz=timezone.utc)
     else:
-        start_dt = started_at if started_at.tzinfo else started_at.replace(tzinfo=timezone.utc)
+        start_dt = started_at.astimezone(timezone.utc)
 
-    if finished_at is None:
-        finish_dt = datetime.now(timezone.utc)
-    elif isinstance(finished_at, (int, float)):
+    if isinstance(finished_at, (int, float)):
         finish_dt = datetime.fromtimestamp(finished_at, tz=timezone.utc)
     else:
-        finish_dt = finished_at if finished_at.tzinfo else finished_at.replace(tzinfo=timezone.utc)
+        finish_dt = finished_at.astimezone(timezone.utc)
 
     duration = max(0.0, (finish_dt - start_dt).total_seconds())
 
-    # 2. Metadata groups
-    git_meta = get_git_metadata(repo_path=repo_path)
-    host_meta = get_host_metadata()
-    package_meta = get_package_metadata()
-    hardware_meta = get_hardware_metadata(device=device)
-    sanitized_cmd = sanitize_command(command)
-
-    execution_meta = ExecutionMetadata(
-        started_at=start_dt.isoformat(),
-        finished_at=finish_dt.isoformat(),
-        duration_seconds=round(duration, 4),
-        command=sanitized_cmd,
-    )
-
-    # 3. Serialized effective configuration (sanitized)
-    raw_config = config.model_dump(mode="json")
-    sanitized_config = sanitize_config_dict(raw_config)
-    config_sha = compute_config_sha256(config)
-
-    experiment_meta = ExperimentMetadata(
-        name=config.name,
-        algorithm=config.algorithm.name,
-        seed=config.seed,
-        training_budget=config.training.total_timesteps if config.training else None,
-        environment_name=config.environment.name,
-        environment_parameters=sanitize_config_dict(dict(config.environment.parameters)),
-        config=sanitized_config,
-        config_sha256=config_sha,
-    )
-
-    # 4. Artifact records
-    artifact_records: List[ArtifactRecord] = []
+    # Record artifacts with SHA-256 hashes
+    artifact_records: Dict[str, ArtifactProvenance] = {}
     if artifacts:
-        for item in artifacts:
-            if isinstance(item, ArtifactRecord):
-                artifact_records.append(item)
-            else:
-                p = Path(item)
-                if not p.is_file():
-                    logger.warning("Artifact file not found for manifest: %s", p)
-                    continue
-                # Guess artifact type from extension
-                suffix = p.suffix.lower()
-                art_type = (
-                    "model"
-                    if suffix == ".zip"
-                    else "metadata"
-                    if suffix == ".json"
-                    else "data"
-                    if suffix == ".csv"
-                    else "checkpoint"
-                    if "checkpoint" in p.name.lower()
-                    else "artifact"
+        for name, art_path in artifacts.items():
+            p = Path(art_path)
+            if p.is_file():
+                artifact_records[name] = ArtifactProvenance(
+                    path=str(p),
+                    sha256=compute_sha256(p),
+                    size_bytes=p.stat().st_size,
                 )
-                artifact_records.append(
-                    create_artifact_record(p, artifact_type=art_type, base_dir=base_dir)
-                )
+
+    cmd = command if command is not None else list(sys.argv)
+    # Sanitize command from possible credentials/keys if any
+    clean_cmd = [
+        arg for arg in cmd if not any(kw in arg.lower() for kw in ("token=", "key=", "pass="))
+    ]
 
     return ExperimentManifest(
-        manifest_version="1.0.0",
-        experiment_name=config.name,
-        git=git_meta,
-        host=host_meta,
-        packages=package_meta,
-        hardware=hardware_meta,
-        execution=execution_meta,
-        experiment=experiment_meta,
+        experiment_name=experiment_name,
+        git=collect_git_metadata(),
+        host=collect_host_system(),
+        packages=collect_software_packages(),
+        hardware=collect_hardware_telemetry(device=device),
+        execution=ExecutionMetadata(
+            started_at=start_dt.isoformat(),
+            finished_at=finish_dt.isoformat(),
+            duration_seconds=round(duration, 3),
+            training_time_seconds=(
+                round(training_time_seconds, 3) if training_time_seconds is not None else None
+            ),
+            command=clean_cmd,
+        ),
+        config=config_dict,
         artifacts=artifact_records,
     )
 
 
-def save_manifest(
-    manifest: ExperimentManifest,
-    path: Union[str, Path],
-    atomic: bool = True,
-) -> Path:
-    """Write an ExperimentManifest to disk as formatted JSON, using atomic replace if requested."""
-    target = Path(path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    payload = manifest.model_dump_json(indent=2)
-
-    if atomic:
-        tmp_target = target.with_suffix(f".tmp.{os.getpid()}")
-        try:
-            with open(tmp_target, "w", encoding="utf-8") as f:
-                f.write(payload)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp_target, target)
-        except Exception:
-            if tmp_target.exists():
-                try:
-                    tmp_target.unlink()
-                except Exception:
-                    pass
-            raise
-    else:
-        with open(target, "w", encoding="utf-8") as f:
-            f.write(payload)
-
-    return target
+def save_manifest(manifest: ExperimentManifest, dest_path: Path | str) -> Path:
+    """Save an experiment manifest to disk as formatted JSON."""
+    out_path = Path(dest_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write(manifest.model_dump_json(indent=2))
+    return out_path
 
 
-def load_manifest(path: Union[str, Path]) -> ExperimentManifest:
-    """Load, parse, and validate an ExperimentManifest from disk."""
-    target = Path(path)
-    if not target.is_file():
-        raise ManifestError(f"Manifest file not found: {target}")
-
-    try:
-        with open(target, "r", encoding="utf-8") as f:
-            raw = json.load(f)
-    except json.JSONDecodeError as exc:
-        raise ManifestError(f"Malformed JSON in manifest at {target}: {exc}") from exc
-    except Exception as exc:
-        raise ManifestError(f"Failed to read manifest at {target}: {exc}") from exc
-
-    if not isinstance(raw, dict):
-        raise ManifestError(
-            f"Manifest at {target} must contain a JSON object, got {type(raw).__name__}"
-        )
-
-    try:
-        return ExperimentManifest.model_validate(raw)
-    except ValidationError as exc:
-        raise ManifestError(f"Manifest validation failed for {target}: {exc}") from exc
-
-
-__all__ = [
-    "ArtifactRecord",
-    "CORE_PACKAGES",
-    "ExecutionMetadata",
-    "ExperimentManifest",
-    "ExperimentMetadata",
-    "GitMetadata",
-    "HardwareMetadata",
-    "HostMetadata",
-    "ManifestError",
-    "PackageMetadata",
-    "compute_file_sha256",
-    "create_artifact_record",
-    "generate_manifest",
-    "get_git_metadata",
-    "get_hardware_metadata",
-    "get_host_metadata",
-    "get_package_metadata",
-    "load_manifest",
-    "sanitize_command",
-    "sanitize_config_dict",
-    "sanitize_path",
-    "save_manifest",
-]
+def load_manifest(path: Path | str) -> ExperimentManifest:
+    """Load and validate an experiment manifest from disk."""
+    p = Path(path)
+    if not p.is_file():
+        raise FileNotFoundError(f"Experiment manifest not found: {p}")
+    content = p.read_text(encoding="utf-8")
+    return ExperimentManifest.model_validate_json(content)

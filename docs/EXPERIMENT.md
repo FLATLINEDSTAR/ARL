@@ -335,66 +335,55 @@ Outputs are automatically exported to:
 
 ---
 
-## 7. Experiment Manifest & Software Provenance
+## 6. Experiment Manifest and Provenance Auditing
 
-### Overview
-To ensure scientific reproducibility, every training run automatically generates a machine-readable experiment manifest (`experiment.json` and `{name}_manifest.json`). The manifest records full environmental, algorithmic, and software provenance alongside trained models and evaluation artifacts, establishing a verifiable audit trail for published results.
+Every training and benchmark run automatically persists a comprehensive experiment manifest to `artifacts/metadata/{name}_manifest.json` (Issue #248). The manifest ensures scientific reproducibility and verifiable artifact provenance without requiring external cloud trackers.
 
-### Manifest File Locations
-Upon completion of `RLTrainer.fit()`, the manifest is written atomically to:
-- Primary metadata path: `artifacts/metadata/{name}_manifest.json`
-- Experiment directory: `artifacts/experiments/{name}/experiment.json`
+### Manifest Schema & Contents
 
-### Manifest Schema & Sections
-
-The manifest adheres to a strict Pydantic schema (`ExperimentManifest`) with the following sections:
-
-| Section | Key Fields | Description |
-|---|---|---|
-| **Schema** | `manifest_version` | Schema version string (e.g. `"1.0.0"`). |
-| **Identity** | `experiment_name` | Name of the experiment (e.g. `"drone_ppo"`). |
-| **Git Provenance** | `git_commit`, `git_branch`, `git_dirty` | Exact commit SHA-1 hash, active branch (or `"detached"`), and boolean flag indicating whether uncommitted modifications exist. Gracefully set to `"unknown"` if Git is unavailable or running outside a repository. |
-| **Host System** | `os_name`, `os_version`, `python_version`, `architecture` | Host OS (`Linux`, `Darwin`, `Windows`), kernel release, Python interpreter version (`3.10.x`), and CPU machine architecture (`x86_64`, `aarch64`). |
-| **Packages** | `adaptive_rl`, `torch`, `sb3`, `gymnasium`, `numpy`, `typer`, `pydantic` | Exact installed dependency versions retrieved via standard library `importlib.metadata` without importing heavy modules. |
-| **Hardware** | `device`, `cuda_device_name`, `cpu_count` | Compute device actually utilized (`cpu` or `cuda`), CUDA GPU model name (if GPU was actively used), and logical CPU core count. |
-| **Execution** | `started_at`, `finished_at`, `duration_seconds`, `command` | ISO 8601 UTC timestamps, elapsed execution duration in seconds, and sanitized command line invocation. |
-| **Experiment Config** | `algorithm`, `seed`, `training_budget`, `environment_name`, `config`, `config_sha256` | Complete deserialized `ExperimentConfig` dictionary, random seed, and deterministic SHA-256 fingerprint of the configuration. |
-| **Artifact Provenance** | `artifacts` (`path`, `sha256`, `size_bytes`, `artifact_type`) | List of all generated files (`.zip` model weights, `.json` metadata, checkpoints) with relative paths and cryptographic SHA-256 integrity digests computed via streaming reads. |
-
-### Security & Sanitization Guarantees
-- **Strict Allowlisting**: The manifest generator never dumps `os.environ`. Sensitive environment variables (e.g. API keys, access tokens, credentials) never enter the payload.
-- **Credential Masking**: Command lines and nested configuration parameters matching sensitive patterns (`key`, `token`, `secret`, `password`, `auth`) are automatically masked as `***`.
-- **Path Privacy**: Absolute home directory paths (`/home/<user>/...`) are replaced with workspace-relative paths or `~/` to prevent leaking private workstation directory layouts.
+The manifest document captures:
+1. **Git Provenance**:
+   - `git_commit`: Full 40-character SHA-1 commit hash (or `"unknown"` if executed outside a Git repository).
+   - `git_branch`: Active Git branch name.
+   - `git_dirty`: Boolean flag indicating whether uncommitted source modifications were present at execution time.
+2. **Host System & Python Runtime**:
+   - `os_name`, `os_version`: Operating system platform and kernel release.
+   - `python_version`: Precise Python interpreter version.
+   - `architecture`: Hardware architecture (e.g. `x86_64`, `aarch64`).
+3. **Software Package Pinned Versions**:
+   - Explicit pinned versions of core dependencies: `adaptive_rl`, `torch`, `stable_baselines3`, `gymnasium`, `numpy`, `typer`, and `pydantic`.
+4. **Hardware & Compute Telemetry**:
+   - `device`: Primary compute device used (`cpu` or `cuda`).
+   - `gpu_name`, `gpu_count`: Dedicated accelerator specifications if GPU is available.
+   - `cpu_count`: Available logical CPU cores.
+5. **Execution Timing & Invocation**:
+   - `started_at`, `finished_at`: Exact ISO 8601 UTC timestamps.
+   - `duration_seconds`: Total wall-clock duration of the experiment.
+   - `training_time_seconds`: Monotonic duration of interaction/training (excluding model serialization).
+   - `command`: Sanitized command line arguments (`sys.argv`).
+6. **Artifact Checksums & Provenance**:
+   - Full filesystem paths, file sizes, and **SHA-256 cryptographic digests** for all generated model weight files (`.zip`) and metric reports (`.json`).
+7. **Security & Sanitization**:
+   - The manifest generator strictly avoids recording environment credentials, API tokens, passwords, or unrelated private files.
 
 ### Inspecting a Manifest via CLI
-You can inspect and validate any generated manifest using the `inspect manifest` command:
+
+Inspect and verify an experiment manifest using the CLI:
 
 ```bash
-# Inspect manifest from metadata directory
+# Using 'inspect manifest'
 adaptive-rl inspect manifest artifacts/metadata/drone_ppo_manifest.json
 
-# Inspect manifest from experiment directory
-adaptive-rl inspect manifest artifacts/experiments/drone_ppo/experiment.json
+# Using 'manifest inspect'
+adaptive-rl manifest inspect artifacts/metadata/drone_ppo_manifest.json
 ```
 
-Example CLI summary output:
-```text
-╭─ Experiment Manifest: drone_ppo_manifest.json ──────────────────────────────╮
-│ ✓ Experiment Manifest is valid!                                             │
-│                                                                             │
-│ • Experiment: drone_ppo                                                     │
-│ • Algorithm: PPO (Seed: 42)                                                 │
-│ • Git: c0a88f5 (branch: main, clean)                                        │
-│ • Host: Linux 6.6.137+ (Python 3.10.12, x86_64)                             │
-│ • Hardware: cpu                                                             │
-│ • Packages: adaptive_rl 0.1.0, torch 2.14.0, sb3 2.9.0, gym 1.3.0 ...       │
-│ • Execution: Started 2026-09-28T20:15:00+00:00 (Duration: 25.40s)           │
-│ • Command: adaptive-rl train --config configs/drone_ppo.yaml                │
-│ • Artifacts (2):                                                            │
-│   • models/drone_ppo_final.zip (e3b0c44298fc...)                            │
-│   • metadata/drone_ppo_training.json (a948904f2f0f...)                      │
-╰─────────────────────────────────────────────────────────────────────────────╯
-```
+The CLI renders a formatted terminal table detailing all categories and verifies whether linked artifact files exist and match their recorded SHA-256 checksums (`✓ Verified`).
 
-### Reproducibility Note
-The manifest records complete experimental provenance and cryptographic verification checksums for auditing. While this allows exact recreation of software environments, configurations, and random seeds, reinforcement learning optimization is not guaranteed to be bit-for-bit reproducible across different hardware architectures, operating systems, or CUDA driver versions due to non-deterministic GPU kernel reductions.
+### Reproducing an Experiment from a Manifest
+
+To audit or reproduce a historical experiment:
+1. **Verify Source State**: Checkout the exact Git commit recorded in `git.git_commit`. If `git_dirty` is `true`, note that working-tree modifications were present.
+2. **Verify Environment**: Compare Python and package versions against `packages`.
+3. **Replay Configuration**: Instantiate the experiment using the identical `config` payload and `config.seed`.
+4. **Verify Generated Weights**: Calculate SHA-256 of the resulting model weights and compare against the manifest's `artifacts.model.sha256`.

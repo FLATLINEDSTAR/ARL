@@ -668,3 +668,22 @@ log_dir: "{tmp_path / "logs"}"
     assert res.exit_code == 0
     assert "Benchmark Comparison" in res.output
     assert "Classical Planner" in res.output
+
+
+def test_cli_benchmark_adaptation_help() -> None:
+    """Verify adaptive-rl benchmark adaptation --help displays options."""
+    result = runner.invoke(app, ["benchmark", "adaptation", "--help"])
+    assert result.exit_code == 0
+    clean_output = re.sub(r"\x1b\[[0-9;]*[a-zA-Z]", "", result.output)
+    assert "--seeds" in clean_output
+    assert "--timesteps" in clean_output
+    assert "--quick" in clean_output
+    assert "--output" in clean_output
+
+
+def test_cli_demo_help() -> None:
+    """Verify adaptive-rl demo --help displays options."""
+    result = runner.invoke(app, ["demo", "--help"])
+    assert result.exit_code == 0
+    clean_output = re.sub(r"\x1b\[[0-9;]*[a-zA-Z]", "", result.output)
+    assert "--seed" in clean_output
