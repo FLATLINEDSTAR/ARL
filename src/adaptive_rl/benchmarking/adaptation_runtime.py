@@ -119,6 +119,17 @@ class EpisodeRecord:
     final_info: dict[str, Any]
     transitions: tuple[Transition, ...]
 
+
+class EpisodeTaggedTransition:
+    """Internal SAC replay record with a post-shift episode provenance tag."""
+
+    def __init__(self, transition: Transition, episode_index: int) -> None:
+        self.transition = transition
+        self.episode_index = int(episode_index)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.transition, name)
+
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 

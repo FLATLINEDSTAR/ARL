@@ -37,7 +37,11 @@ from adaptive_rl.benchmarking.adaptation_artifacts import (
     write_replicate_checkpoint,
     write_study_manifest,
 )
-from adaptive_rl.benchmarking.adaptation_runtime import EpisodeRecord, evaluate_episode
+from adaptive_rl.benchmarking.adaptation_runtime import (
+    EpisodeRecord,
+    EpisodeTaggedTransition,
+    evaluate_episode,
+)
 from adaptive_rl.benchmarking.adaptation_statistics import analyze_primary_cells
 from adaptive_rl.config import ExperimentConfig, compute_config_sha256
 from adaptive_rl.environments.registry import make_env
@@ -268,6 +272,45 @@ def _run_evaluation_segment(
         )
         update_log = None
     return records
+
+
+def _tagged_sac_batch(batch: Any) -> Any:
+    """Attach protocol episode indices to each transition without changing JSON schema."""
+    from adaptive_rl.protocol.adaptation import UpdateBatch
+
+    raise TypeError("use _build_tagged_sac_batch with completed episode records")
+
+
+def _build_tagged_sac_batch(
+    training_seed: int,
+    episodes: Sequence[Any],
+    *,
+    block_episode: int,
+) -> Any:
+    """Build SAC's strict episode-tagged view of exactly the visible prefix."""
+    from adaptive_rl.protocol.adaptation import UpdateBatch
+    from adaptive_rl.protocol.seeds import derive_seed
+
+    indices = tuple(episode.index for episode in episodes)
+    expected = tuple(range(1, block_episode + 1))
+    if indices != expected:
+        raise RuntimeError(
+            f"SAC B{block_episode} requires completed episodes 1..{block_episode}, got {indices}"
+        )
+    for episode in episodes:
+        if episode.seed != derive_seed(training_seed, "post", episode.index):
+            raise RuntimeError(f"SAC episode {episode.index} has an invalid derived seed")
+    transitions = tuple(
+        EpisodeTaggedTransition(transition, episode.index)
+        for episode in episodes
+        for transition in episode.transitions
+    )
+    return UpdateBatch(
+        block_episode=block_episode,
+        seed=derive_seed(training_seed, "update", block_episode - 5),
+        visible_episode_indices=indices,
+        transitions=transitions,
+    )
 
 
 def _recover(pre: Sequence[EpisodeRecord], post: Sequence[EpisodeRecord]) -> dict[str, Any]:
@@ -647,6 +690,12 @@ def _run_replicate(
             raise RuntimeError("Adaptive/Fixed forks did not originate at the frozen fingerprint")
         adapter = _adapter_for(config.algorithm.name.lower())
         post_history = [episode.post_shift_data() for episode in result.shared_shock_episodes]
+        if config.algorithm.name.lower() == "sac":
+            nominal_replay = getattr(getattr(algorithm, "model", None), "replay_buffer", None)
+            if nominal_replay is not None:
+                # Retain the nominal buffer only as unreachable provenance; neither
+                # arm can access it after the independent fork.
+                nominal_replay.reset()
         adaptive_env = _new_env(
             config,
             shifted=True,
@@ -656,9 +705,24 @@ def _run_replicate(
         try:
             for episode_index in range(6, N_POST + 1):
                 boundary = episode_index - 1
-                batch = build_update_batch(training_seed, post_history, block_episode=boundary)
+                batch = (
+                    _build_tagged_sac_batch(training_seed, post_history, block_episode=boundary)
+                    if config.algorithm.name.lower() == "sac"
+                    else build_update_batch(training_seed, post_history, block_episode=boundary)
+                )
+                before_fingerprint = model_fingerprint(adaptive)
                 update_log = run_adaptation_update(adaptive, adapter, batch)
-                result.update_blocks.append(update_log.to_dict())
+                block_record = update_log.to_dict()
+                if config.algorithm.name.lower() == "sac":
+                    sac_model = adaptive.model
+                    assert sac_model is not None
+                    if getattr(sac_model, "_adaptive_rl_last_train_call_count", 0) != 1:
+                        raise RuntimeError("SAC update did not execute exactly one native train call")
+                    if model_fingerprint(adaptive) == before_fingerprint:
+                        raise RuntimeError(f"SAC adaptive weights did not change at B{boundary}")
+                    audit = getattr(sac_model, "_adaptive_rl_last_audit", None)
+                    block_record["sac_audit"] = audit
+                result.update_blocks.append(block_record)
                 record = _run_evaluation_segment(
                     algorithm=adaptive,
                     env=adaptive_env,

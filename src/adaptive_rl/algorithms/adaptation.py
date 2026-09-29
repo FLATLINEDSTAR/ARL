@@ -16,6 +16,32 @@ from adaptive_rl.protocol.adaptation import AdaptationAdapter, UpdateBatch, call
 from adaptive_rl.protocol.fork import model_fingerprint, policy_state_tensors
 
 
+class TaggedReplayBuffer(ReplayBuffer):
+    """SB3 replay storage with one post-shift episode index per occupied slot."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.episode_tags: list[int] = []
+
+    def add_tagged(
+        self,
+        obs: np.ndarray,
+        next_obs: np.ndarray,
+        action: np.ndarray,
+        reward: np.ndarray,
+        done: np.ndarray,
+        infos: list[dict[str, Any]],
+        *,
+        episode_index: int,
+    ) -> None:
+        super().add(obs, next_obs, action, reward, done, infos)
+        if self.full:
+            # Adaptation capacity is sized to the visible prefix, so wraparound
+            # is not expected; failing prevents tags from silently desyncing.
+            raise RuntimeError("tagged adaptation replay buffer unexpectedly wrapped")
+        self.episode_tags.append(int(episode_index))
+
+
 @contextmanager
 def _seeded_update(seed: int) -> Iterator[None]:
     """Seed update-side RNGs and restore caller RNG state on exit."""
@@ -151,7 +177,7 @@ def _previous_done(transitions: tuple[Any, ...], previous_index: int) -> bool:
 
 
 class SACAdaptationAdapter:
-    """Train SAC from a fresh replay buffer containing only the visible batch."""
+    """Train SAC from a fresh, episode-tagged buffer containing visible data only."""
 
     def __init__(self) -> None:
         self.last_loss_metrics: dict[str, float] = {}
@@ -164,9 +190,13 @@ class SACAdaptationAdapter:
             raise ValueError(
                 "SAC adaptation requires positive configured gradient steps and batch size"
             )
+        if tuple(sorted(set(batch.visible_episode_indices))) != batch.visible_episode_indices:
+            raise RuntimeError("SAC update episode indices must be unique and ordered")
+        if len(batch.transitions) == 0:
+            raise RuntimeError("SAC update requires at least one transition")
         count = len(batch.transitions)
         # Never reuse the replay buffer containing nominal training experience.
-        replay = ReplayBuffer(
+        replay = TaggedReplayBuffer(
             buffer_size=max(count, int(model.batch_size)),
             observation_space=model.observation_space,
             action_space=model.action_space,
@@ -175,6 +205,15 @@ class SACAdaptationAdapter:
             optimize_memory_usage=False,
             handle_timeout_termination=True,
         )
+        # The shared Transition type intentionally stays algorithm-neutral. The
+        # runner supplies tagged transitions via a thin subclass; plain
+        # protocol batches retain their established semantics.
+        tags = tuple(getattr(item, "episode_index", None) for item in batch.transitions)
+        if any(tag is None or int(tag) not in batch.visible_episode_indices for tag in tags):
+            raise RuntimeError("SAC buffer contains an untagged or invisible episode")
+        if max(int(tag) for tag in tags if tag is not None) > batch.block_episode:
+            raise RuntimeError("SAC buffer contains future episode data")
+        model._adaptive_rl_episode_tags = []
         for transition in batch.transitions:
             observation = np.asarray(transition.observation).reshape(
                 (1, *np.asarray(transition.observation).shape)
@@ -184,7 +223,10 @@ class SACAdaptationAdapter:
             )
             action = np.asarray(transition.action).reshape((1, -1))
             done = bool(transition.terminated or transition.truncated)
-            replay.add(
+            episode_index = getattr(transition, "episode_index", None)
+            if episode_index is None:
+                raise RuntimeError("SAC transition is missing its episode index tag")
+            replay.add_tagged(
                 observation,
                 next_observation,
                 action,
@@ -197,17 +239,64 @@ class SACAdaptationAdapter:
                         )
                     }
                 ],
+                episode_index=int(episode_index),
             )
+        if replay.size() != count or len(replay.episode_tags) != count:
+            raise RuntimeError("tagged adaptation buffer size does not match inserted transitions")
+        if replay.episode_tags and max(replay.episode_tags) > batch.block_episode:
+            raise RuntimeError("tagged adaptation buffer contains future episode data")
 
         prior_buffer = model.replay_buffer
+        audit_before = _sac_state_fingerprint(model)
+        target_before = _module_snapshot(model.critic_target)
         model.replay_buffer = replay
         try:
             with _logger_ready(model), _seeded_update(batch.seed):
+                model._adaptive_rl_last_train_call_count = 0
+                original_train = model.train
+
+                def tracked_train(*args: Any, **kwargs: Any) -> Any:
+                    model._adaptive_rl_last_train_call_count += 1
+                    return original_train(*args, **kwargs)
+
+                model.train = tracked_train
+                model._adaptive_rl_last_train_call_count = 0
                 model.train(
                     gradient_steps=int(model.gradient_steps), batch_size=int(model.batch_size)
                 )
+                model.train = original_train
                 self.last_loss_metrics = _loss_metrics(model)
+                model._adaptive_rl_last_loss_metrics = dict(self.last_loss_metrics)
+                after_target = _module_snapshot(model.critic_target)
+                target_changed = any(
+                    not torch.equal(target_before[name], after_target[name])
+                    for name in target_before
+                )
+                if not target_changed:
+                    raise RuntimeError("SAC target critic did not update during the block")
+                alpha = _sac_alpha(model)
+                model._adaptive_rl_last_audit = {
+                    "derived_seed": batch.seed,
+                    "gradient_steps": int(model.gradient_steps),
+                    "batch_size": int(model.batch_size),
+                    "buffer_size": replay.size(),
+                    "buffer_episode_tags": list(replay.episode_tags),
+                    "actor_loss": _metric_by_suffix(self.last_loss_metrics, "actor_loss"),
+                    "critic_loss": _metric_by_suffix(self.last_loss_metrics, "critic_loss"),
+                    "alpha": alpha,
+                    "alpha_loss": _metric_by_suffix(self.last_loss_metrics, "ent_coef_loss"),
+                    "target_network_update_count": int(model.gradient_steps),
+                    "tau": float(model.tau),
+                    "fingerprint_before": audit_before,
+                    "fingerprint_after": _sac_state_fingerprint(model),
+                    "fingerprint_components": [
+                        "actor", "critics", "target_critics", "temperature"
+                    ],
+                    "optimizer_fingerprints": _optimizer_fingerprint(model),
+                }
         finally:
+            if "original_train" in locals():
+                model.train = original_train
             model.replay_buffer = prior_buffer
             model.policy.set_training_mode(False)
 
@@ -223,6 +312,7 @@ class AdaptationUpdateLog:
     parameter_delta_l2: float
     status: str
     loss_metrics: dict[str, float]
+    sac_audit: dict[str, Any] = None  # type: ignore[assignment]
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
