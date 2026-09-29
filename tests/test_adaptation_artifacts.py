@@ -24,6 +24,7 @@ from adaptive_rl.config import compute_config_sha256, load_config
 from adaptive_rl.protocol.constants import (
     ISSUE271_CONFIG_SHA256,
     ISSUE271_TREATMENT_CARD_SHA256,
+    ISSUE273_TREATMENT_CARD_SHA256,
 )
 from adaptive_rl.protocol.seeds import frozen_schedule, schedule_fingerprint
 

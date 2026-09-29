@@ -87,12 +87,16 @@ def clone_algorithm(algorithm: Any) -> Any:
 class FrozenPolicy:
     """Prediction-only facade that exposes no training or model mutation API."""
 
-    __slots__ = ("__algorithm",)
+    __slots__ = ("__algorithm", "__initial_state")
 
     def __init__(self, algorithm: Any) -> None:
         if not callable(getattr(algorithm, "predict", None)):
             raise TypeError("Frozen policy requires an algorithm with predict().")
         self.__algorithm = algorithm
+        self.__initial_state = {
+            name: tensor.detach().cpu().clone()
+            for name, tensor in policy_state_tensors(algorithm).items()
+        }
 
     def predict(self, observation: Any, deterministic: bool = True) -> Any:
         return self.__algorithm.predict(observation, deterministic=deterministic)
@@ -100,6 +104,21 @@ class FrozenPolicy:
     @property
     def fingerprint(self) -> str:
         return model_fingerprint(self.__algorithm)
+
+    @property
+    def parameter_delta_l2(self) -> float:
+        """L2 distance from the frozen model state, including SAC temperature."""
+        current = policy_state_tensors(self.__algorithm)
+        if current.keys() != self.__initial_state.keys():
+            raise RuntimeError("Frozen model state structure changed")
+        squared_delta = 0.0
+        for name, tensor in current.items():
+            initial = self.__initial_state[name]
+            if tensor.shape != initial.shape or tensor.dtype != initial.dtype:
+                raise RuntimeError(f"Frozen model state {name!r} changed shape or dtype")
+            delta = tensor.detach().cpu().to(torch.float64) - initial.to(torch.float64)
+            squared_delta += float(torch.sum(delta * delta))
+        return float(squared_delta**0.5)
 
 
 def fork_adaptive_and_fixed(algorithm: Any) -> tuple[Any, FrozenPolicy, str]:

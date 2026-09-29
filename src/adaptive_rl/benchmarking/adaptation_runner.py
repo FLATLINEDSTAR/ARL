@@ -13,7 +13,7 @@ import sys
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Optional, Sequence
+from typing import Any, Callable, Mapping, Optional, Sequence
 
 import gymnasium as gym
 import numpy as np
@@ -297,7 +297,19 @@ def _build_tagged_sac_batch(
         if episode.seed != derive_seed(training_seed, "post", episode.index):
             raise RuntimeError(f"SAC episode {episode.index} has an invalid derived seed")
     transitions = tuple(
-        EpisodeTaggedTransition(transition, episode.index)
+        EpisodeTaggedTransition(
+            observation=transition.observation,
+            action=transition.action,
+            reward=transition.reward,
+            next_observation=transition.next_observation,
+            terminated=transition.terminated,
+            truncated=transition.truncated,
+            environment_action=transition.environment_action,
+            behavior_log_prob=transition.behavior_log_prob,
+            behavior_value=transition.behavior_value,
+            behavior_next_value=transition.behavior_next_value,
+            episode_index=episode.index,
+        )
         for episode in episodes
         for transition in episode.transitions
     )
@@ -307,6 +319,17 @@ def _build_tagged_sac_batch(
         visible_episode_indices=indices,
         transitions=transitions,
     )
+
+
+def _reset_sac_adaptation_buffer(algorithm: Any) -> None:
+    """Purge copied or restored nominal SAC replay state before adaptation."""
+    model = getattr(algorithm, "model", None)
+    replay = getattr(model, "replay_buffer", None)
+    if replay is None or not callable(getattr(replay, "reset", None)):
+        raise RuntimeError("SAC adaptive fork has no resettable replay buffer")
+    replay.reset()
+    if int(replay.size()) != 0:
+        raise RuntimeError("SAC adaptation buffer is not empty at adaptation start")
 
 
 def _recover(pre: Sequence[EpisodeRecord], post: Sequence[EpisodeRecord]) -> dict[str, Any]:
@@ -342,7 +365,7 @@ def _enable_study_determinism() -> dict[str, Any]:
 
 
 def _audit_replicate_invariants(
-    replicate: dict[str, Any], schedule: dict[int, dict[str, list[int]]]
+    replicate: dict[str, Any], schedule: Mapping[int, Mapping[str, Sequence[int]]]
 ) -> dict[str, Any]:
     """Recompute the execution invariants from one serialized replicate record."""
     blocks = replicate["update_blocks"]
@@ -683,11 +706,7 @@ def _run_replicate(
         adapter = _adapter_for(config.algorithm.name.lower())
         post_history = [episode.post_shift_data() for episode in result.shared_shock_episodes]
         if config.algorithm.name.lower() == "sac":
-            nominal_replay = getattr(getattr(algorithm, "model", None), "replay_buffer", None)
-            if nominal_replay is not None:
-                # Retain the nominal buffer only as unreachable provenance; neither
-                # arm can access it after the independent fork.
-                nominal_replay.reset()
+            _reset_sac_adaptation_buffer(adaptive)
         adaptive_env = _new_env(
             config,
             shifted=True,
@@ -709,10 +728,23 @@ def _run_replicate(
                     sac_model = adaptive.model
                     assert sac_model is not None
                     if getattr(sac_model, "_adaptive_rl_last_train_call_count", 0) != 1:
-                        raise RuntimeError("SAC update did not execute exactly one native train call")
+                        raise RuntimeError(
+                            "SAC update did not execute exactly one native train call"
+                        )
                     if model_fingerprint(adaptive) == before_fingerprint:
                         raise RuntimeError(f"SAC adaptive weights did not change at B{boundary}")
                     audit = getattr(sac_model, "_adaptive_rl_last_audit", None)
+                    if not isinstance(audit, dict):
+                        raise RuntimeError(f"SAC B{boundary} did not produce its audit record")
+                    if audit["fingerprint_before"] == audit["fingerprint_after"]:
+                        raise RuntimeError(f"SAC B{boundary} state fingerprint did not change")
+                    if result.update_blocks:
+                        prior_audit = result.update_blocks[-1].get("sac_audit")
+                        if (
+                            not isinstance(prior_audit, dict)
+                            or prior_audit["fingerprint_after"] != audit["fingerprint_before"]
+                        ):
+                            raise RuntimeError("SAC block audit fingerprints do not chain")
                     block_record["sac_audit"] = audit
                 result.update_blocks.append(block_record)
                 record = _run_evaluation_segment(
@@ -758,6 +790,10 @@ def _run_replicate(
         result.fixed_final_fingerprint = fixed.fingerprint
         if result.fixed_final_fingerprint != frozen_fingerprint:
             raise RuntimeError("Fixed policy fingerprint changed during its evaluation arm")
+        if config.algorithm.name.lower() == "sac":
+            result.fixed_parameter_delta_l2 = fixed.parameter_delta_l2
+            if result.fixed_parameter_delta_l2 != 0.0:
+                raise RuntimeError("Fixed SAC weight delta is not exactly zero")
 
         adaptive_post = result.shared_shock_episodes + result.adaptive_episodes
         fixed_post = result.shared_shock_episodes + result.fixed_episodes
@@ -805,6 +841,10 @@ def run_adaptation_benchmark(
     if config.training is None:
         raise ValueError("Issue #265 requires a training section")
     card = _card_path()
+    if study_run_id is not None:
+        # Issue #271's frozen PPO execution identity uses its immutable card
+        # snapshot; Issue #273 extends the current SAC treatment separately.
+        card = card.with_name("TREATMENT_CARD_ISSUE271.md")
     if not card.is_file():
         raise FileNotFoundError(f"Treatment Card is required before experiment execution: {card}")
     card_sha = _sha256_file(card)

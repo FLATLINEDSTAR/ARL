@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import importlib
 import random
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
@@ -34,11 +36,9 @@ class TaggedReplayBuffer(ReplayBuffer):
         *,
         episode_index: int,
     ) -> None:
+        if len(self.episode_tags) >= self.buffer_size:
+            raise RuntimeError("tagged adaptation replay buffer capacity exceeded")
         super().add(obs, next_obs, action, reward, done, infos)
-        if self.full:
-            # Adaptation capacity is sized to the visible prefix, so wraparound
-            # is not expected; failing prevents tags from silently desyncing.
-            raise RuntimeError("tagged adaptation replay buffer unexpectedly wrapped")
         self.episode_tags.append(int(episode_index))
 
 
@@ -165,6 +165,10 @@ class PPOAdaptationAdapter:
             last_values=torch.zeros(1, dtype=torch.float32, device=model.device),
             dones=np.ones(1, dtype=np.float32),
         )
+        # Recent SB3 releases leave pos at buffer_size after the last add;
+        # once full, train() consumes the entire buffer and ignores pos. Reset
+        # it to preserve the established fully-populated buffer invariant.
+        model.rollout_buffer.pos = 0
         with _logger_ready(model), _seeded_update(batch.seed):
             model.train()
             self.last_loss_metrics = _loss_metrics(model)
@@ -190,8 +194,11 @@ class SACAdaptationAdapter:
             raise ValueError(
                 "SAC adaptation requires positive configured gradient steps and batch size"
             )
-        if tuple(sorted(set(batch.visible_episode_indices))) != batch.visible_episode_indices:
-            raise RuntimeError("SAC update episode indices must be unique and ordered")
+        expected_indices = tuple(range(1, batch.block_episode + 1))
+        if batch.visible_episode_indices != expected_indices:
+            raise RuntimeError(
+                f"SAC B{batch.block_episode} requires visible episodes {expected_indices}"
+            )
         if len(batch.transitions) == 0:
             raise RuntimeError("SAC update requires at least one transition")
         count = len(batch.transitions)
@@ -205,16 +212,26 @@ class SACAdaptationAdapter:
             optimize_memory_usage=False,
             handle_timeout_termination=True,
         )
-        # The shared Transition type intentionally stays algorithm-neutral. The
-        # runner supplies tagged transitions via a thin subclass; plain
-        # protocol batches retain their established semantics.
+        # The experiment runner always tags records explicitly. Equal-sized
+        # legacy direct adapter batches remain supported for the existing
+        # adapter API, but malformed/mixed provenance fails closed.
         tags = tuple(getattr(item, "episode_index", None) for item in batch.transitions)
+        if all(tag is None for tag in tags):
+            if count % len(batch.visible_episode_indices):
+                raise RuntimeError("SAC transitions are missing episode index tags")
+            per_episode = count // len(batch.visible_episode_indices)
+            tags = tuple(
+                index for index in batch.visible_episode_indices for _ in range(per_episode)
+            )
         if any(tag is None or int(tag) not in batch.visible_episode_indices for tag in tags):
             raise RuntimeError("SAC buffer contains an untagged or invisible episode")
         if max(int(tag) for tag in tags if tag is not None) > batch.block_episode:
             raise RuntimeError("SAC buffer contains future episode data")
-        model._adaptive_rl_episode_tags = []
-        for transition in batch.transitions:
+        if set(int(tag) for tag in tags if tag is not None) != set(expected_indices):
+            raise RuntimeError("SAC buffer does not contain every visible episode")
+        for transition, episode_index in zip(batch.transitions, tags):
+            if episode_index is None:
+                raise RuntimeError("SAC transition is missing its episode index tag")
             observation = np.asarray(transition.observation).reshape(
                 (1, *np.asarray(transition.observation).shape)
             )
@@ -223,9 +240,6 @@ class SACAdaptationAdapter:
             )
             action = np.asarray(transition.action).reshape((1, -1))
             done = bool(transition.terminated or transition.truncated)
-            episode_index = getattr(transition, "episode_index", None)
-            if episode_index is None:
-                raise RuntimeError("SAC transition is missing its episode index tag")
             replay.add_tagged(
                 observation,
                 next_observation,
@@ -248,10 +262,18 @@ class SACAdaptationAdapter:
 
         prior_buffer = model.replay_buffer
         audit_before = _sac_state_fingerprint(model)
+        actor_before = _module_snapshot(model.actor)
+        critic_before = _module_snapshot(model.critic)
         target_before = _module_snapshot(model.critic_target)
         model.replay_buffer = replay
+        had_train_override = "train" in model.__dict__
+        old_train_override = model.__dict__.get("train")
         try:
-            with _logger_ready(model), _seeded_update(batch.seed):
+            with (
+                _logger_ready(model),
+                _seeded_update(batch.seed),
+                _validate_polyak_updates(model) as polyak_taus,
+            ):
                 model._adaptive_rl_last_train_call_count = 0
                 original_train = model.train
 
@@ -264,16 +286,34 @@ class SACAdaptationAdapter:
                 model.train(
                     gradient_steps=int(model.gradient_steps), batch_size=int(model.batch_size)
                 )
-                model.train = original_train
+                if had_train_override:
+                    model.train = old_train_override
+                else:
+                    del model.__dict__["train"]
                 self.last_loss_metrics = _loss_metrics(model)
                 model._adaptive_rl_last_loss_metrics = dict(self.last_loss_metrics)
+                actor_after = _module_snapshot(model.actor)
+                critic_after = _module_snapshot(model.critic)
+                if not _snapshots_differ(actor_before, actor_after):
+                    raise RuntimeError("SAC actor parameters did not change during the block")
+                if not _snapshots_differ(critic_before, critic_after):
+                    raise RuntimeError("SAC critic parameters did not change during the block")
                 after_target = _module_snapshot(model.critic_target)
                 target_changed = any(
                     not torch.equal(target_before[name], after_target[name])
                     for name in target_before
                 )
-                if not target_changed:
-                    raise RuntimeError("SAC target critic did not update during the block")
+                target_updates = (
+                    int(model.gradient_steps) + int(model.target_update_interval) - 1
+                ) // int(model.target_update_interval)
+                if len(polyak_taus) != target_updates:
+                    raise RuntimeError(
+                        "SAC target update count disagrees with its configured interval"
+                    )
+                if target_changed != (target_updates > 0):
+                    raise RuntimeError(
+                        "SAC target critic mutation disagrees with the native update interval"
+                    )
                 alpha = _sac_alpha(model)
                 model._adaptive_rl_last_audit = {
                     "derived_seed": batch.seed,
@@ -285,18 +325,20 @@ class SACAdaptationAdapter:
                     "critic_loss": _metric_by_suffix(self.last_loss_metrics, "critic_loss"),
                     "alpha": alpha,
                     "alpha_loss": _metric_by_suffix(self.last_loss_metrics, "ent_coef_loss"),
-                    "target_network_update_count": int(model.gradient_steps),
+                    "target_network_update_count": target_updates,
+                    "target_update_interval": int(model.target_update_interval),
+                    "polyak_taus_observed": polyak_taus,
                     "tau": float(model.tau),
                     "fingerprint_before": audit_before,
                     "fingerprint_after": _sac_state_fingerprint(model),
-                    "fingerprint_components": [
-                        "actor", "critics", "target_critics", "temperature"
-                    ],
+                    "fingerprint_components": ["actor", "critics", "target_critics", "temperature"],
                     "optimizer_fingerprints": _optimizer_fingerprint(model),
                 }
         finally:
-            if "original_train" in locals():
-                model.train = original_train
+            if had_train_override:
+                model.train = old_train_override
+            elif "train" in model.__dict__:
+                del model.__dict__["train"]
             model.replay_buffer = prior_buffer
             model.policy.set_training_mode(False)
 
@@ -312,7 +354,6 @@ class AdaptationUpdateLog:
     parameter_delta_l2: float
     status: str
     loss_metrics: dict[str, float]
-    sac_audit: dict[str, Any] = None  # type: ignore[assignment]
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -331,6 +372,124 @@ def _loss_metrics(model: Any) -> dict[str, float]:
     if not metrics:
         raise RuntimeError("adaptation update produced no finite loss metrics")
     return metrics
+
+
+def _metric_by_suffix(metrics: dict[str, float], suffix: str) -> float | None:
+    matches = [value for name, value in metrics.items() if name.lower().endswith(suffix)]
+    if len(matches) > 1:
+        raise RuntimeError(f"SAC produced ambiguous {suffix} metrics: {matches}")
+    return matches[0] if matches else None
+
+
+def _module_snapshot(module: Any) -> dict[str, torch.Tensor]:
+    return {name: value.detach().cpu().clone() for name, value in module.state_dict().items()}
+
+
+def _snapshots_differ(before: dict[str, torch.Tensor], after: dict[str, torch.Tensor]) -> bool:
+    return before.keys() == after.keys() and any(
+        not torch.equal(before[name], after[name]) for name in before
+    )
+
+
+@contextmanager
+def _validate_polyak_updates(model: Any) -> Iterator[list[float]]:
+    """Check each native SAC critic-target update against its Polyak equation."""
+    module = importlib.import_module("stable_baselines3.sac.sac")
+    native_polyak_update = getattr(module, "polyak_update", None)
+    if not callable(native_polyak_update):
+        raise RuntimeError("Installed Stable-Baselines3 SAC lacks polyak_update")
+    target_parameter_ids = tuple(
+        parameter.data_ptr() for parameter in model.critic_target.parameters()
+    )
+    observed_taus: list[float] = []
+
+    def checked_polyak_update(source: Any, target: Any, tau: float) -> None:
+        source_parameters = list(source)
+        target_parameters = list(target)
+        before = [parameter.detach().clone() for parameter in target_parameters]
+        native_polyak_update(source_parameters, target_parameters, tau)
+        for old_target, source_parameter, target_parameter in zip(
+            before, source_parameters, target_parameters
+        ):
+            expected = old_target * (1.0 - tau) + source_parameter.detach() * tau
+            if not torch.allclose(target_parameter, expected, rtol=1e-4, atol=1e-6):
+                raise RuntimeError("SAC target network violates the native Polyak update")
+        if tuple(parameter.data_ptr() for parameter in target_parameters) == target_parameter_ids:
+            if float(tau) != float(model.tau):
+                raise RuntimeError("SAC critic target update used an unexpected tau")
+            observed_taus.append(float(tau))
+
+    setattr(module, "polyak_update", checked_polyak_update)
+    try:
+        yield observed_taus
+    finally:
+        setattr(module, "polyak_update", native_polyak_update)
+
+
+def _sac_alpha(model: Any) -> float:
+    log_value = getattr(model, "log_ent_coef", None)
+    if isinstance(log_value, torch.Tensor):
+        return float(log_value.detach().exp().cpu().reshape(-1)[0])
+    value = getattr(model, "ent_coef_tensor", None)
+    if isinstance(value, torch.Tensor):
+        return float(value.detach().cpu().reshape(-1)[0])
+    value = getattr(model, "ent_coef", None)
+    if isinstance(value, torch.Tensor):
+        return float(value.detach().cpu().reshape(-1)[0])
+    if isinstance(value, (float, int)):
+        return float(value)
+    raise RuntimeError("SAC entropy coefficient is unavailable for audit")
+
+
+def _sac_state_fingerprint(model: Any) -> str:
+    """Fingerprint SAC's actor, critics, target critics, and entropy coefficient."""
+    digest = hashlib.sha256()
+    for label, module in (
+        ("actor", model.actor),
+        ("critics", model.critic),
+        ("target_critics", model.critic_target),
+    ):
+        for name, tensor in sorted(module.state_dict().items()):
+            value = tensor.detach().cpu().contiguous()
+            digest.update(f"{label}.{name}".encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(str(value.dtype).encode("ascii"))
+            digest.update(value.view(torch.uint8).numpy().tobytes(order="C"))
+    for label in ("log_ent_coef", "ent_coef_tensor", "ent_coef"):
+        value = getattr(model, label, None)
+        if isinstance(value, torch.Tensor):
+            digest.update(label.encode("ascii"))
+            digest.update(value.detach().cpu().contiguous().view(torch.uint8).numpy().tobytes())
+        elif label == "ent_coef" and isinstance(value, (int, float)):
+            digest.update(label.encode("ascii"))
+            digest.update(repr(float(value)).encode("ascii"))
+    return digest.hexdigest()
+
+
+def _optimizer_fingerprint(model: Any) -> dict[str, str]:
+    """Hash optimizer state for the complete fork provenance record."""
+    result: dict[str, str] = {}
+    for name, optimizer in _optimizers(model):
+        digest = hashlib.sha256()
+        _hash_tree(digest, optimizer.state_dict())
+        result[name] = digest.hexdigest()
+    return result
+
+
+def _hash_tree(digest: Any, value: Any) -> None:
+    if isinstance(value, torch.Tensor):
+        tensor = value.detach().cpu().contiguous()
+        digest.update(str(tensor.dtype).encode("ascii"))
+        digest.update(tensor.reshape(-1).view(torch.uint8).numpy().tobytes(order="C"))
+    elif isinstance(value, dict):
+        for key in sorted(value, key=str):
+            digest.update(str(key).encode("utf-8"))
+            _hash_tree(digest, value[key])
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            _hash_tree(digest, item)
+    else:
+        digest.update(repr(value).encode("utf-8"))
 
 
 def _parameters(model_or_wrapper: Any) -> dict[str, torch.Tensor]:

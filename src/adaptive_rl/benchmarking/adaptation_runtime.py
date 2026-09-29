@@ -119,17 +119,6 @@ class EpisodeRecord:
     final_info: dict[str, Any]
     transitions: tuple[Transition, ...]
 
-
-class EpisodeTaggedTransition:
-    """Internal SAC replay record with a post-shift episode provenance tag."""
-
-    def __init__(self, transition: Transition, episode_index: int) -> None:
-        self.transition = transition
-        self.episode_index = int(episode_index)
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self.transition, name)
-
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
@@ -141,6 +130,13 @@ class EpisodeTaggedTransition:
             seed=self.episode_seed,
             transitions=self.transitions,
         )
+
+
+@dataclass(frozen=True)
+class EpisodeTaggedTransition(Transition):
+    """Internal SAC replay record with a post-shift episode provenance tag."""
+
+    episode_index: int = -1
 
 
 def evaluate_episode(
@@ -212,6 +208,17 @@ def evaluate_episode(
     fingerprint_end = _fingerprint(algorithm)
     if fingerprint_end != fingerprint_start:
         raise RuntimeError("Policy parameters changed during an evaluation episode")
+    parameter_delta_l2 = getattr(update_log, "parameter_delta_l2", None)
+    if arm == "fixed" and algorithm_name == "sac":
+        parameter_delta_l2 = getattr(algorithm, "parameter_delta_l2", None)
+        if parameter_delta_l2 != 0.0:
+            raise RuntimeError(
+                f"Fixed SAC weight delta must be exactly 0, got {parameter_delta_l2!r}"
+            )
+    elif arm == "shared" and algorithm_name == "sac":
+        # fingerprint_start == fingerprint_end above establishes exact
+        # state equality for these shared pre-treatment episodes.
+        parameter_delta_l2 = 0.0
     if not rewards:
         raise RuntimeError("Environment returned an empty episode")
     safe_info: dict[str, Any] = {}
@@ -248,7 +255,7 @@ def evaluate_episode(
         update_block=getattr(update_log, "block_episode", None),
         update_seed=getattr(update_log, "update_seed", None),
         update_status=getattr(update_log, "status", None),
-        parameter_delta_l2=getattr(update_log, "parameter_delta_l2", None),
+        parameter_delta_l2=parameter_delta_l2,
         final_info=safe_info,
         transitions=tuple(transitions),
     )

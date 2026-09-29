@@ -22,7 +22,7 @@ from typing import Any, Callable
 
 from adaptive_rl.benchmarking.adaptation_artifacts import (
     STUDY_ARTIFACT_SCHEMA_VERSION,
-    SUPPORTED_STUDY_MANIFEST_SCHEMA_VERSIONS,
+    STUDY_MANIFEST_SCHEMA_VERSION,
 )
 from adaptive_rl.benchmarking.adaptation_statistics import (
     analyze_primary_cells,
@@ -35,12 +35,7 @@ from adaptive_rl.protocol.constants import (
     TRAINING_SEEDS,
 )
 from adaptive_rl.protocol.recovery import compute_recovery
-from adaptive_rl.protocol.seed_schedule import (
-    SEED_SCHEDULE_VERSION,
-    frozen_schedule,
-    schedule_fingerprint,
-    validate_schedule,
-)
+from adaptive_rl.protocol.seeds import frozen_schedule, schedule_fingerprint
 from adaptive_rl.protocol.statistics import decide_family
 
 PASS, FAIL, SKIPPED = "PASS", "FAIL", "SKIPPED"
@@ -181,18 +176,8 @@ def validate_result_package(
         raw_paths = [key for key, _ in raw_entries]
         if len(raw_paths) != len(set(raw_paths)):
             raise ValueError("manifest lists artifact paths more than once")
-        if manifest.get("schema_version") not in SUPPORTED_STUDY_MANIFEST_SCHEMA_VERSIONS:
+        if manifest.get("schema_version") != STUDY_MANIFEST_SCHEMA_VERSION:
             raise ValueError("unsupported manifest schema_version")
-        if manifest.get("schema_version") == "1.1":
-            raw_schedule = manifest.get("seed_schedule")
-            if not isinstance(raw_schedule, dict) or manifest.get("seed_schedule_validation") != {
-                "verified": True
-            }:
-                raise ValueError("manifest does not attest a validated seed schedule")
-            normalized = {int(seed): phases for seed, phases in raw_schedule.items()}
-            validate_schedule(normalized)
-            if manifest.get("seed_schedule_fingerprint") != schedule_fingerprint(normalized):
-                raise ValueError("manifest seed schedule fingerprint does not recompute")
         errors: list[str] = []
         for relative, expected in entries.items():
             try:
@@ -254,7 +239,7 @@ def validate_result_package(
 
     def schema_protocol() -> tuple[str, dict[str, Any]]:
         manifest, artifact = package.need("manifest"), package.need("artifact")
-        if manifest.get("schema_version") not in SUPPORTED_STUDY_MANIFEST_SCHEMA_VERSIONS:
+        if manifest.get("schema_version") != STUDY_MANIFEST_SCHEMA_VERSION:
             raise ValueError("unsupported manifest schema_version")
         if artifact.get("schema_version") != STUDY_ARTIFACT_SCHEMA_VERSION:
             raise ValueError("unsupported result artifact schema_version")
@@ -262,27 +247,6 @@ def validate_result_package(
             raise ValueError("protocol_version does not match this validator")
         if artifact.get("schedule_fingerprint") != schedule_fingerprint(frozen_schedule()):
             raise ValueError("seed schedule fingerprint does not match frozen schedule")
-        if manifest.get("schema_version") == "1.1":
-            recorded_schedule = manifest.get("seed_schedule")
-            if not isinstance(recorded_schedule, dict):
-                raise ValueError("manifest seed schedule is missing")
-            try:
-                normalized_schedule = {
-                    int(seed): domains for seed, domains in recorded_schedule.items()
-                }
-                validate_schedule(normalized_schedule)
-            except (TypeError, ValueError) as exc:
-                raise ValueError("manifest seed schedule is invalid") from exc
-            expected_fingerprint = schedule_fingerprint(frozen_schedule())
-            if (
-                manifest.get("seed_schedule_fingerprint") != expected_fingerprint
-                or schedule_fingerprint(normalized_schedule) != expected_fingerprint
-            ):
-                raise ValueError("manifest seed schedule does not match frozen schedule")
-            if manifest.get("seed_schedule_validation") != {"verified": True}:
-                raise ValueError("manifest does not attest seed schedule validation")
-            if manifest.get("seed_schedule_module_version") != SEED_SCHEDULE_VERSION:
-                raise ValueError("manifest seed schedule module version is unsupported")
         if artifact.get("run_type") != "prereg-v1" or artifact.get("run_status") != "COMPLETE":
             raise ValueError("result is not a complete prereg-v1 study run")
         experiment = artifact.get("experiment", {})
