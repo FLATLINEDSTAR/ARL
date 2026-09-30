@@ -42,12 +42,12 @@ from adaptive_rl.evaluation.evaluator import Evaluator
 CSV_FIELDNAMES = [
     "budget_timesteps",
     "trained_timesteps",
-    "success_rate",
-    "collision_rate",
-    "timeout_rate",
-    "mean_reward",
-    "std_reward",
-    "mean_episode_length",
+    "pooled_success_rate",
+    "pooled_collision_rate",
+    "pooled_timeout_rate",
+    "pooled_mean_reward",
+    "pooled_std_reward",
+    "pooled_mean_episode_length",
     "training_time_seconds",
     "model_path",
     "training_seed",
@@ -434,6 +434,12 @@ def test_learning_curve_benchmark_execution_and_exports(
         assert metadata["episodes_per_seed"] == 1
         assert metadata["model_path"] == row["model_path"]
         assert metadata["training_time_seconds"] == row["training_time_seconds"]
+        budget_result_path = Path(row["model_path"]).parents[1] / "budget_result.json"
+        budget_result = json.loads(budget_result_path.read_text(encoding="utf-8"))
+        assert budget_result["status"] == "completed"
+        assert budget_result["result"]["budget_timesteps"] == row["budget_timesteps"]
+        budget_dir = Path(row["model_path"]).parents[1]
+        assert list(budget_dir.parent.glob(f".{budget_dir.name}.*")) == []
     assert set(data["plot_data"]) == {
         "budgets",
         "trained_timesteps",
@@ -462,7 +468,8 @@ def test_learning_curve_benchmark_execution_and_exports(
     assert len(rows) == len(result.points)
     assert not any(field.startswith("Unnamed:") for field in reader.fieldnames or [])
     assert [int(row["budget_timesteps"]) for row in rows] == [64, 128]
-    assert all(math.isfinite(float(row["mean_reward"])) for row in rows)
+    assert all(math.isfinite(float(row["pooled_mean_reward"])) for row in rows)
+    assert "mean_reward" not in (reader.fieldnames or [])
     assert all(Path(row["model_path"]).is_file() for row in rows)
     assert all(row["training_seed"] == "17" for row in rows)
     assert all(row["evaluation_seeds"] == "11;12" for row in rows)
@@ -474,6 +481,18 @@ def test_learning_curve_benchmark_execution_and_exports(
     assert all(row["environment"] == "drone" for row in rows)
     assert all(len(row["environment_fingerprint"]) == 64 for row in rows)
     assert all(row["deterministic"] == "True" for row in rows)
+    provenance = data["provenance"]
+    assert re.fullmatch(r"[0-9a-f]{64}", provenance["configuration_fingerprint_sha256"])
+    assert provenance["environment_fingerprint_sha256"] == result.environment_fingerprint
+    assert provenance["training_seed"] == 17
+    assert provenance["evaluation_seeds"] == [11, 12]
+    assert provenance["requested_budgets"] == [64, 128]
+    assert provenance["git_commit"] is None or re.fullmatch(
+        r"[0-9a-f]{40}", provenance["git_commit"]
+    )
+    assert provenance["working_tree_dirty"] is None or isinstance(
+        provenance["working_tree_dirty"], bool
+    )
 
 
 def test_learning_curve_benchmark_repeats_deterministically(tmp_path: Path) -> None:
@@ -501,6 +520,12 @@ def test_learning_curve_benchmark_repeats_deterministically(tmp_path: Path) -> N
     assert first.plot_data["budgets"] == [65]
     assert first.plot_data["trained_timesteps"] == [128]
     assert first.training_seed == second.training_seed == 17
+    first_provenance = json.loads(first.json_path.read_text(encoding="utf-8"))["provenance"]
+    second_provenance = json.loads(second.json_path.read_text(encoding="utf-8"))["provenance"]
+    assert (
+        first_provenance["configuration_fingerprint_sha256"]
+        == second_provenance["configuration_fingerprint_sha256"]
+    )
     assert first.evaluation_seeds == second.evaluation_seeds == [11, 12]
     assert first.evaluation_episodes == second.evaluation_episodes == 1
     assert first.deterministic is second.deterministic is True
@@ -588,7 +613,7 @@ def test_benchmark_keeps_single_episode_standard_deviation_unavailable(
     assert result.csv_path is not None
     with result.csv_path.open(newline="", encoding="utf-8") as handle:
         row = next(csv.DictReader(handle))
-    assert row["std_reward"] == ""
+    assert row["pooled_std_reward"] == ""
 
 
 def test_json_manifest_replace_is_atomic_on_interruption(
@@ -1343,6 +1368,41 @@ def test_first_budget_failure_still_writes_status_manifest(
     with result.csv_path.open(newline="", encoding="utf-8") as handle:
         rows = list(csv.DictReader(handle))
     assert rows == []
+
+
+def test_failed_budget_does_not_publish_partial_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import adaptive_rl.benchmarking.learning_curve as learning_curve_module
+
+    config = _make_config(tmp_path)
+    target_dir = tmp_path / "staged_failure"
+
+    def fail_evaluation(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("evaluation failed")
+
+    monkeypatch.setattr(learning_curve_module, "_evaluate_model", fail_evaluation)
+
+    with pytest.raises(BenchmarkRunError, match="evaluation failed"):
+        run_learning_curve_benchmark(config, budgets=[64], output_dir=target_dir)
+
+    budget_parent = target_dir / "learning_curve"
+    assert not (budget_parent / "budget_64").exists()
+    assert list(budget_parent.glob(".budget_64.*")) == []
+
+
+def test_existing_benchmark_output_is_not_overwritten(tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    target_dir = tmp_path / "existing_output"
+    target_dir.mkdir()
+    report = target_dir / "learning_curve_budget.json"
+    report.write_text('{"prior_run": true}\n', encoding="utf-8")
+
+    with pytest.raises(FileExistsError, match="choose a fresh output directory"):
+        run_learning_curve_benchmark(config, budgets=[64], output_dir=target_dir)
+
+    assert report.read_text(encoding="utf-8") == '{"prior_run": true}\n'
+    assert not (target_dir / "learning_curve").exists()
 
 
 def test_cli_reports_partial_benchmark_failure_with_nonzero_exit(
