@@ -418,6 +418,34 @@ def impute_differences(
     return differences
 
 
+def impute_censored_differences(
+    fixed: Sequence[Optional[float]],
+    adaptive: Sequence[Optional[float]],
+    censored_value: float,
+) -> List[float]:
+    """Impute censored episodes (math.inf) to a specific finite TH value.
+    
+    Failed runs (None) are still skipped (pairwise-complete).
+    """
+    if len(fixed) != len(adaptive):
+        raise ValueError("arm vectors must have equal length")
+
+    differences: List[float] = []
+    for t_fixed, t_adaptive in zip(fixed, adaptive):
+        if t_fixed is None or t_adaptive is None:
+            continue
+            
+        f_val = float(censored_value) if t_fixed == math.inf else float(t_fixed)
+        a_val = float(censored_value) if t_adaptive == math.inf else float(t_adaptive)
+        
+        if not (math.isfinite(f_val) and math.isfinite(a_val)):
+            raise ValueError("T_H values must be finite after imputation")
+            
+        differences.append(a_val - f_val)
+        
+    return differences
+
+
 # ---------------------------------------------------------------------------
 # Sensitivity analyses (different targets — labeled as such in the document)
 # ---------------------------------------------------------------------------
@@ -531,6 +559,25 @@ def exact_wilcoxon_signed_rank(
         rank_sum_positive=float(w_plus_observed),
         p_value=float(extreme) / float(total),
     )
+
+
+def robust_wilcoxon_signed_rank(
+    differences: Sequence[float],
+    min_valid_n: int = MIN_VALID_N,
+) -> float:
+    """Wilcoxon signed-rank p-value: exact for N <= 20, scipy asymptotic otherwise."""
+    values = _validated_vector(differences)
+    nonzero = [v for v in values if v != 0.0]
+    n_nonzero = len(nonzero)
+    if n_nonzero <= 20:
+        return exact_wilcoxon_signed_rank(differences, min_valid_n).p_value
+    else:
+        try:
+            import scipy.stats as stats
+        except ImportError:
+            raise ImportError("scipy is required for Wilcoxon signed-rank test for N > 20.")
+        stat, p = stats.wilcoxon(differences, alternative="less", mode="asymp")
+        return float(p)
 
 
 def bootstrap_percentile_ci(
@@ -652,6 +699,12 @@ class SampleDiagnostics:
     shapiro_p_value: float
     skewness: float
     kurtosis: float
+    best_case_imputation_bounds: Tuple[float, float]
+    worst_case_imputation_bounds: Tuple[float, float]
+    wilcoxon_p_value: float
+    sign_test_p_value: float
+    bootstrap_ci: Tuple[float, float]
+    warnings: List[str]
 
 
 def calculate_diagnostics(
@@ -688,6 +741,34 @@ def calculate_diagnostics(
     else:
         kurt = sample_kurtosis(valid_differences)
 
+    best_diffs = impute_censored_differences(fixed, adaptive, 15.0)
+    worst_diffs = impute_censored_differences(fixed, adaptive, 30.0)
+    
+    if len(best_diffs) >= MIN_VALID_N:
+        best_ci = paired_t_interval(best_diffs, min_valid_n=MIN_VALID_N)
+    else:
+        best_ci = (math.nan, math.nan)
+        
+    if len(worst_diffs) >= MIN_VALID_N:
+        worst_ci = paired_t_interval(worst_diffs, min_valid_n=MIN_VALID_N)
+    else:
+        worst_ci = (math.nan, math.nan)
+        
+    if n_valid >= MIN_VALID_N:
+        wilcoxon_p = robust_wilcoxon_signed_rank(valid_differences, min_valid_n=MIN_VALID_N)
+        sign_p = exact_sign_test(valid_differences, min_valid_n=MIN_VALID_N).p_value
+        boot_ci = bootstrap_percentile_ci(valid_differences, min_valid_n=MIN_VALID_N)
+    else:
+        wilcoxon_p = math.nan
+        sign_p = math.nan
+        boot_ci = (math.nan, math.nan)
+
+    warnings = []
+    if n_valid < 10:
+        warnings.append(f"Insufficient sample size for reliable diagnostics: N={n_valid} < 10.")
+    if not math.isnan(p) and p < 0.05:
+        warnings.append(f"Normality assumption rejected (Shapiro-Wilk p={p:.4f} < 0.05).")
+
     return SampleDiagnostics(
         n_valid=n_valid,
         n_censored=n_censored,
@@ -696,7 +777,70 @@ def calculate_diagnostics(
         shapiro_p_value=p,
         skewness=skew,
         kurtosis=kurt,
+        best_case_imputation_bounds=best_ci,
+        worst_case_imputation_bounds=worst_ci,
+        wilcoxon_p_value=wilcoxon_p,
+        sign_test_p_value=sign_p,
+        bootstrap_ci=boot_ci,
+        warnings=warnings,
     )
+
+
+def export_diagnostics_to_dict(diag: SampleDiagnostics) -> dict:
+    """Exports diagnostics to a JSON-serializable dictionary."""
+    return {
+        "metrics": {
+            "n_valid": diag.n_valid,
+            "n_censored": diag.n_censored,
+            "n_failed": diag.n_failed,
+        },
+        "assumptions": {
+            "shapiro_statistic": diag.shapiro_statistic,
+            "shapiro_p_value": diag.shapiro_p_value,
+            "skewness": diag.skewness,
+            "kurtosis": diag.kurtosis,
+        },
+        "sensitivity": {
+            "best_case_imputation_bounds": list(diag.best_case_imputation_bounds),
+            "worst_case_imputation_bounds": list(diag.worst_case_imputation_bounds),
+        },
+        "non_parametric": {
+            "wilcoxon_p_value": diag.wilcoxon_p_value,
+            "sign_test_p_value": diag.sign_test_p_value,
+            "bootstrap_ci": list(diag.bootstrap_ci),
+        },
+        "warnings": diag.warnings,
+    }
+
+
+def generate_diagnostics_text_summary(diag: SampleDiagnostics) -> str:
+    """Generates a human-readable text summary of the statistical diagnostics."""
+    lines = [
+        "--- Statistical Diagnostics & Assumption Report ---",
+        f"Valid pairs: {diag.n_valid} | Censored: {diag.n_censored} | Failed: {diag.n_failed}",
+        "",
+        "Assumptions:",
+        f"  Shapiro-Wilk p-value : {diag.shapiro_p_value:.4f}",
+        f"  Skewness             : {diag.skewness:.4f}",
+        f"  Excess Kurtosis      : {diag.kurtosis:.4f}",
+        "",
+        "Sensitivity & Imputation:",
+        f"  Best-case (TH=15) CI : [{diag.best_case_imputation_bounds[0]:.4f}, {diag.best_case_imputation_bounds[1]:.4f}]",
+        f"  Worst-case (TH=30) CI: [{diag.worst_case_imputation_bounds[0]:.4f}, {diag.worst_case_imputation_bounds[1]:.4f}]",
+        "",
+        "Non-Parametric Robustness:",
+        f"  Wilcoxon p-value     : {diag.wilcoxon_p_value:.4f}",
+        f"  Fisher Sign p-value  : {diag.sign_test_p_value:.4f}",
+        f"  Bootstrap CI         : [{diag.bootstrap_ci[0]:.4f}, {diag.bootstrap_ci[1]:.4f}]",
+        "",
+    ]
+    if diag.warnings:
+        lines.append("WARNINGS:")
+        for w in diag.warnings:
+            lines.append(f"  - {w}")
+    else:
+        lines.append("Warnings: None")
+    return "\n".join(lines)
 
 
 __all__ = [
@@ -712,11 +856,15 @@ __all__ = [
     "decide_family",
     "exact_sign_test",
     "exact_wilcoxon_signed_rank",
+    "export_diagnostics_to_dict",
+    "generate_diagnostics_text_summary",
     "holm_adjust",
+    "impute_censored_differences",
     "impute_differences",
     "paired_differences",
     "paired_t_interval",
     "paired_t_test",
+    "robust_wilcoxon_signed_rank",
     "sample_kurtosis",
     "sample_skewness",
     "shapiro_wilk",
