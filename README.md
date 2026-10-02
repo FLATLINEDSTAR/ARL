@@ -321,7 +321,13 @@ If you only need specific components, smaller dependency sets are available:
 
 ## Step 7 — Verify Installation
 
-Verify that the CLI entry point and environment definitions are registered properly:
+First, run the system doctor to perform a multi-point diagnostic check of your local environment:
+
+```bash
+adaptive-rl doctor
+```
+
+Then, verify that the CLI entry point and environment definitions are registered properly:
 
 ```bash
 # 1. Check CLI options
@@ -754,6 +760,15 @@ ARL/
 ---
 
 ## Troubleshooting
+
+### Run the System Doctor
+If you encounter missing module errors, PyTorch warning messages, or unexpected environment bugs, run the built-in diagnostic tool first:
+
+```bash
+adaptive-rl doctor
+```
+
+The system doctor will scan your Python version, PyTorch GPU acceleration, core dependencies, Gymnasium registrations, and configuration logic, providing exact actionable remediation commands for any failures. You can also append the `--json` flag to export a machine-readable diagnostic report.
 
 ### `python3: command not found`
 Python 3 is not installed or not in your system `$PATH`.  
