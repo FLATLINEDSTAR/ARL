@@ -74,6 +74,32 @@ def _sample_variance(values: Sequence[float]) -> float:
     return float(math.fsum((v - mean) ** 2 for v in values) / (n - 1))
 
 
+def sample_skewness(values: Sequence[float]) -> float:
+    """Sample skewness (Fisher-Pearson coefficient of skewness)."""
+    n = len(values)
+    if n < 3:
+        raise ValueError("skewness requires at least 3 observations")
+    mean = _mean(values)
+    m2 = math.fsum((v - mean) ** 2 for v in values) / n
+    m3 = math.fsum((v - mean) ** 3 for v in values) / n
+    if m2 == 0.0:
+        return 0.0
+    return float(m3 / (m2 ** 1.5))
+
+
+def sample_kurtosis(values: Sequence[float]) -> float:
+    """Sample excess kurtosis (Fisher's definition)."""
+    n = len(values)
+    if n < 4:
+        raise ValueError("kurtosis requires at least 4 observations")
+    mean = _mean(values)
+    m2 = math.fsum((v - mean) ** 2 for v in values) / n
+    m4 = math.fsum((v - mean) ** 4 for v in values) / n
+    if m2 == 0.0:
+        return 0.0
+    return float(m4 / (m2 ** 2) - 3.0)
+
+
 # ---------------------------------------------------------------------------
 # Student-t distribution (pure Python; no scipy)
 # ---------------------------------------------------------------------------
@@ -598,13 +624,90 @@ def decide_family(
     return "NOT_SUPPORTED"
 
 
+# ---------------------------------------------------------------------------
+# Diagnostics and Assumptions
+# ---------------------------------------------------------------------------
+
+
+def shapiro_wilk(differences: Sequence[float]) -> Tuple[float, float]:
+    """Shapiro-Wilk test for normality on paired differences."""
+    values = _validated_vector(differences)
+    if len(values) < 3:
+        raise ValueError("Shapiro-Wilk requires at least 3 observations")
+    try:
+        import scipy.stats as stats
+    except ImportError:
+        raise ImportError("scipy is required for Shapiro-Wilk diagnostics.")
+    stat, p_value = stats.shapiro(values)
+    return float(stat), float(p_value)
+
+
+@dataclass(frozen=True)
+class SampleDiagnostics:
+    """Basic metrics and diagnostic tests for sample assumption audits."""
+    n_valid: int
+    n_censored: int
+    n_failed: int
+    shapiro_statistic: float
+    shapiro_p_value: float
+    skewness: float
+    kurtosis: float
+
+
+def calculate_diagnostics(
+    fixed: Sequence[Optional[float]],
+    adaptive: Sequence[Optional[float]],
+) -> SampleDiagnostics:
+    """Calculate basic metrics and diagnostics on the arms."""
+    if len(fixed) != len(adaptive):
+        raise ValueError("arm vectors must have equal length")
+
+    n_valid = 0
+    n_censored = 0
+    n_failed = 0
+    valid_differences = []
+
+    for t_fixed, t_adaptive in zip(fixed, adaptive):
+        if t_fixed is None or t_adaptive is None:
+            n_failed += 1
+        elif t_fixed == math.inf or t_adaptive == math.inf:
+            n_censored += 1
+        else:
+            n_valid += 1
+            valid_differences.append(float(t_adaptive) - float(t_fixed))
+
+    if n_valid < 3:
+        stat, p = math.nan, math.nan
+        skew = math.nan
+    else:
+        stat, p = shapiro_wilk(valid_differences)
+        skew = sample_skewness(valid_differences)
+        
+    if n_valid < 4:
+        kurt = math.nan
+    else:
+        kurt = sample_kurtosis(valid_differences)
+
+    return SampleDiagnostics(
+        n_valid=n_valid,
+        n_censored=n_censored,
+        n_failed=n_failed,
+        shapiro_statistic=stat,
+        shapiro_p_value=p,
+        skewness=skew,
+        kurtosis=kurt,
+    )
+
+
 __all__ = [
     "IMPUTATION_DIRECTIONS",
     "FamilyDecision",
     "PairedTTest",
+    "SampleDiagnostics",
     "SignTestResult",
     "WilcoxonResult",
     "bootstrap_percentile_ci",
+    "calculate_diagnostics",
     "cohen_dz",
     "decide_family",
     "exact_sign_test",
@@ -614,6 +717,9 @@ __all__ = [
     "paired_differences",
     "paired_t_interval",
     "paired_t_test",
+    "sample_kurtosis",
+    "sample_skewness",
+    "shapiro_wilk",
     "student_t_cdf",
     "student_t_ppf",
 ]
