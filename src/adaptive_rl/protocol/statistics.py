@@ -84,7 +84,7 @@ def sample_skewness(values: Sequence[float]) -> float:
     m3 = math.fsum((v - mean) ** 3 for v in values) / n
     if m2 == 0.0:
         return 0.0
-    return float(m3 / (m2 ** 1.5))
+    return float(m3 / (m2**1.5))
 
 
 def sample_kurtosis(values: Sequence[float]) -> float:
@@ -97,7 +97,7 @@ def sample_kurtosis(values: Sequence[float]) -> float:
     m4 = math.fsum((v - mean) ** 4 for v in values) / n
     if m2 == 0.0:
         return 0.0
-    return float(m4 / (m2 ** 2) - 3.0)
+    return float(m4 / (m2**2) - 3.0)
 
 
 # ---------------------------------------------------------------------------
@@ -424,7 +424,7 @@ def impute_censored_differences(
     censored_value: float,
 ) -> List[float]:
     """Impute censored episodes (math.inf) to a specific finite TH value.
-    
+
     Failed runs (None) are still skipped (pairwise-complete).
     """
     if len(fixed) != len(adaptive):
@@ -434,15 +434,15 @@ def impute_censored_differences(
     for t_fixed, t_adaptive in zip(fixed, adaptive):
         if t_fixed is None or t_adaptive is None:
             continue
-            
+
         f_val = float(censored_value) if t_fixed == math.inf else float(t_fixed)
         a_val = float(censored_value) if t_adaptive == math.inf else float(t_adaptive)
-        
+
         if not (math.isfinite(f_val) and math.isfinite(a_val)):
             raise ValueError("T_H values must be finite after imputation")
-            
+
         differences.append(a_val - f_val)
-        
+
     return differences
 
 
@@ -692,6 +692,7 @@ def shapiro_wilk(differences: Sequence[float]) -> Tuple[float, float]:
 @dataclass(frozen=True)
 class SampleDiagnostics:
     """Basic metrics and diagnostic tests for sample assumption audits."""
+
     n_valid: int
     n_censored: int
     n_failed: int
@@ -735,7 +736,7 @@ def calculate_diagnostics(
     else:
         stat, p = shapiro_wilk(valid_differences)
         skew = sample_skewness(valid_differences)
-        
+
     if n_valid < 4:
         kurt = math.nan
     else:
@@ -743,17 +744,17 @@ def calculate_diagnostics(
 
     best_diffs = impute_censored_differences(fixed, adaptive, 15.0)
     worst_diffs = impute_censored_differences(fixed, adaptive, 30.0)
-    
+
     if len(best_diffs) >= MIN_VALID_N:
         best_ci = paired_t_interval(best_diffs, min_valid_n=MIN_VALID_N)
     else:
         best_ci = (math.nan, math.nan)
-        
+
     if len(worst_diffs) >= MIN_VALID_N:
         worst_ci = paired_t_interval(worst_diffs, min_valid_n=MIN_VALID_N)
     else:
         worst_ci = (math.nan, math.nan)
-        
+
     if n_valid >= MIN_VALID_N:
         wilcoxon_p = robust_wilcoxon_signed_rank(valid_differences, min_valid_n=MIN_VALID_N)
         sign_p = exact_sign_test(valid_differences, min_valid_n=MIN_VALID_N).p_value
