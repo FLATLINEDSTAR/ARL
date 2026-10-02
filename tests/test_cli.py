@@ -123,14 +123,16 @@ training:
   log_interval: 10
 evaluation:
   eval_episodes: 2
-output_dir: "{tmp_path / "artifacts"}"
-log_dir: "{tmp_path / "logs"}"
+output_dir: "{(tmp_path / 'artifacts').as_posix()}"
+log_dir: "{(tmp_path / 'logs').as_posix()}"
 """,
         encoding="utf-8",
     )
 
     # 1. Train command
     train_res = runner.invoke(app, ["train", "--config", str(test_config), "--timesteps", "64"])
+    if train_res.exit_code != 0:
+        print(f"STDOUT from CLI: {train_res.stdout}")
     assert train_res.exit_code == 0
     assert "Training Completed Successfully!" in train_res.output
 
@@ -228,8 +230,8 @@ training:
   log_interval: 10
 evaluation:
   eval_episodes: 2
-output_dir: "{tmp_path / "artifacts"}"
-log_dir: "{tmp_path / "logs"}"
+output_dir: "{(tmp_path / 'artifacts').as_posix()}"
+log_dir: "{(tmp_path / 'logs').as_posix()}"
 """,
         encoding="utf-8",
     )

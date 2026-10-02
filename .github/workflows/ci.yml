@@ -98,3 +98,7 @@ jobs:
       - name: Run end-to-end pipeline smoke test
         run: |
           pytest -v tests/test_e2e_smoke.py
+
+      - name: Run research protocol smoke test
+        run: |
+          pytest -v tests/test_research_protocol_smoke.py
