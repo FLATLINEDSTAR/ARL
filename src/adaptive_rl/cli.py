@@ -937,12 +937,13 @@ def gui(
 def doctor_cmd(
     json_output: bool = typer.Option(
         False, "--json", help="Export machine-readable diagnostic report in JSON format."
-    )
+    ),
 ) -> None:
     """Run a comprehensive full-system diagnostic health check."""
-    import sys
     import json
-    from adaptive_rl.diagnostics.doctor import SystemDoctor, CheckStatus
+    import sys
+
+    from adaptive_rl.diagnostics.doctor import CheckStatus, SystemDoctor
 
     doctor = SystemDoctor()
     results = doctor.run_all_checks()
@@ -957,7 +958,7 @@ def doctor_cmd(
         Panel.fit(
             "[bold cyan]Adaptive-RL System Doctor[/bold cyan]\n"
             "Running comprehensive environment diagnostics...",
-            border_style="cyan"
+            border_style="cyan",
         )
     )
 
@@ -984,7 +985,7 @@ def doctor_cmd(
     console.print(
         Panel.fit(
             f"Diagnostic Complete: {summary['passed']} passed, {summary['warnings']} warnings, {summary['failed']} failed",
-            border_style=color
+            border_style=color,
         )
     )
 
