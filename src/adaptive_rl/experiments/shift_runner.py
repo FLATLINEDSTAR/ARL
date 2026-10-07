@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+from pathlib import Path
 
 from adaptive_rl.algorithms.ppo import PPOAlgorithm
 from adaptive_rl.environments.registry import make_env
@@ -36,28 +37,20 @@ class AdaptiveShiftRunner:
     Online Adaptation Blocks, and Recovery Analysis.
     """
 
-    def __init__(self, env_name="drone", training_steps=128, k_pre=2, w=2, h=4, block_steps=16):
+    def __init__(self, env_name="drone", training_steps=128, k_pre=2, w=2, h=4, block_steps=16, seed=42, output_dir=None):
         self.env_name = env_name
         self.training_steps = training_steps
         self.k_pre = k_pre
         self.w = w
         self.h = h
         self.block_steps = block_steps
+        self.seed = seed
+        self.output_dir = Path(output_dir) if output_dir else Path("experiments/smoke_test")
 
-    def run(self) -> dict:
-        # 1. Train
-        env = make_env(self.env_name)
-        algo = PPOAlgorithm(env=env, learning_rate=1e-3, n_steps=self.training_steps, batch_size=16)
-        algo.train(total_timesteps=self.training_steps)
-
-        # 2. Freeze
-        fingerprint = policy_fingerprint(algo)
-        frozen_weights = get_weights(algo)
-
-        # 3. Pre-Shift Eval (Nominal)
-        pre_shift_returns = []
-        for _ in range(self.k_pre):
-            obs, _ = env.reset()
+    def _eval_algo(self, algo: PPOAlgorithm, env, episodes: int) -> list:
+        returns = []
+        for _ in range(episodes):
+            obs, _ = env.reset(seed=self.seed)
             done = False
             ret = 0.0
             steps = 0
@@ -67,72 +60,61 @@ class AdaptiveShiftRunner:
                 done = terminated or truncated
                 ret += float(reward)
                 steps += 1
-            pre_shift_returns.append(ret)
+            returns.append(ret)
+        return returns
 
-        # 4. Shock Window (Shift Introduced)
-        shock_returns = []
-        for _ in range(self.w):
-            obs, _ = env.reset()
-            done = False
-            ret = 0.0
-            steps = 0
-            while not done and steps < 5:
-                action, _ = algo.predict(obs, deterministic=True)
-                obs, reward, terminated, truncated, _ = env.step(action)
-                done = terminated or truncated
-                ret += float(reward)
-                steps += 1
-            shock_returns.append(ret)
+    def run(self) -> dict:
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # 1. Train
+        train_env = make_env(self.env_name)
+        train_env.reset(seed=self.seed)
+        algo = PPOAlgorithm(env=train_env, learning_rate=1e-3, n_steps=self.training_steps, batch_size=16, seed=self.seed)
+        algo.train(total_timesteps=self.training_steps)
 
-        # 5. Fork
+        # 2. Freeze
+        fingerprint = policy_fingerprint(algo)
+        frozen_weights = get_weights(algo)
+        algo.save(self.output_dir / "frozen_policy.zip")
+
+        # 3. Pre-Shift Eval (Nominal)
+        eval_env = make_env(self.env_name)
+        pre_shift_returns = self._eval_algo(algo, eval_env, self.k_pre)
+
+        # 4. Shock Window (Shift Introduced) & Fork Environments
+        fixed_env = make_env(self.env_name, linear_damping=0.5)
+        adaptive_env = make_env(self.env_name, linear_damping=0.5)
+
+        # 5. Fork Algorithms
         # Fixed Arm
         fixed_algo = PPOAlgorithm(
-            env=env, learning_rate=1e-3, n_steps=self.block_steps, batch_size=16
+            env=fixed_env, learning_rate=1e-3, n_steps=self.block_steps, batch_size=16, seed=self.seed
         )
         fixed_algo.model.policy.load_state_dict(frozen_weights)
         fixed_weights_before = get_weights(fixed_algo)
 
         # Adaptive Arm
         adaptive_algo = PPOAlgorithm(
-            env=env, learning_rate=1e-3, n_steps=self.block_steps, batch_size=16
+            env=adaptive_env, learning_rate=1e-3, n_steps=self.block_steps, batch_size=16, seed=self.seed
         )
         adaptive_algo.model.policy.load_state_dict(frozen_weights)
         adaptive_weights_before = get_weights(adaptive_algo)
 
-        # 6. Online Adaptation Blocks & Arm Segments
-        adaptive_post_returns = list(shock_returns)
-        fixed_post_returns = list(shock_returns)
+        # 6. Evaluate Shock Window
+        fixed_post_returns = self._eval_algo(fixed_algo, fixed_env, self.w)
+        adaptive_post_returns = self._eval_algo(adaptive_algo, adaptive_env, self.w)
 
+        # 7. Online Adaptation Blocks & Arm Segments
         # Run remaining episodes
         for _ in range(self.h - self.w):
             # Adaptive Arm executes online update block
             adaptive_algo.train(total_timesteps=self.block_steps)
 
             # Evaluate Adaptive Arm
-            obs, _ = env.reset()
-            done = False
-            ret = 0.0
-            steps = 0
-            while not done and steps < 5:
-                action, _ = adaptive_algo.predict(obs, deterministic=True)
-                obs, reward, terminated, truncated, _ = env.step(action)
-                done = terminated or truncated
-                ret += float(reward)
-                steps += 1
-            adaptive_post_returns.append(ret)
+            adaptive_post_returns.extend(self._eval_algo(adaptive_algo, adaptive_env, 1))
 
             # Evaluate Fixed Arm
-            obs, _ = env.reset()
-            done = False
-            ret = 0.0
-            steps = 0
-            while not done and steps < 5:
-                action, _ = fixed_algo.predict(obs, deterministic=True)
-                obs, reward, terminated, truncated, _ = env.step(action)
-                done = terminated or truncated
-                ret += float(reward)
-                steps += 1
-            fixed_post_returns.append(ret)
+            fixed_post_returns.extend(self._eval_algo(fixed_algo, fixed_env, 1))
 
         fixed_weights_after = get_weights(fixed_algo)
         adaptive_weights_after = get_weights(adaptive_algo)
@@ -140,15 +122,14 @@ class AdaptiveShiftRunner:
         fixed_l2_delta = l2_delta(fixed_weights_before, fixed_weights_after)
         adaptive_l2_delta = l2_delta(adaptive_weights_before, adaptive_weights_after)
 
-        # 7. Recovery Analysis
+        # 8. Recovery Analysis
         fixed_recovery = compute_recovery(pre_shift_returns, fixed_post_returns)
         adaptive_recovery = compute_recovery(pre_shift_returns, adaptive_post_returns)
 
-        # 8. Manifest
+        # 9. Manifest
         manifest = {
             "fingerprint": fingerprint,
             "pre_shift_returns": pre_shift_returns,
-            "shock_returns": shock_returns,
             "fixed_post_returns": fixed_post_returns,
             "adaptive_post_returns": adaptive_post_returns,
             "fixed_l2_delta": fixed_l2_delta,
@@ -160,5 +141,9 @@ class AdaptiveShiftRunner:
 
         manifest_str = json.dumps(manifest, sort_keys=True)
         manifest["checksum"] = hashlib.sha256(manifest_str.encode("utf-8")).hexdigest()
+        
+        manifest_path = self.output_dir / "manifest.json"
+        with open(manifest_path, "w") as f:
+            json.dump(manifest, f, indent=2, sort_keys=True)
 
         return manifest
