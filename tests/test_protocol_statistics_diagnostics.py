@@ -78,8 +78,8 @@ def test_sensitivity_imputation_bounds() -> None:
     assert diag.n_valid == 6  # (indices 0, 1, 5, 7, 8, 9)
 
     # Ensure bounds are calculated (should be length 2 tuples)
-    assert len(diag.best_case_imputation_bounds) == 2
-    assert len(diag.worst_case_imputation_bounds) == 2
+    assert len(diag.sensitivity_scenario_15) == 2
+    assert len(diag.sensitivity_scenario_30) == 2
 
 
 def test_non_parametric_robustness_checks() -> None:
@@ -117,3 +117,46 @@ def test_diagnostics_orchestrator_warnings() -> None:
     adaptive_skewed = [0.1] * 19 + [10.0]  # Skewed
     diag_skewed = calculate_diagnostics(fixed_skewed, adaptive_skewed)
     assert any("Normality assumption rejected" in w for w in diag_skewed.warnings)
+
+def test_diagnostics_edge_cases() -> None:
+    pytest.importorskip("scipy")
+
+    # Edge Case 1: Identical values / zeros
+    fixed_zeros = [1.0] * 15
+    adaptive_zeros = [1.0] * 15
+    # calculate_diagnostics calls shapiro_wilk, which fails/warns on zero variance depending on scipy version.
+    # To avoid scipy warnings crashing the test, we just check the diag object.
+    diag_zeros = calculate_diagnostics(fixed_zeros, adaptive_zeros)
+    assert diag_zeros.n_valid == 15
+    assert diag_zeros.wilcoxon_p_value == 1.0
+
+    # Edge Case 2: Ties
+    fixed_ties = [1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 3.0, 3.0, 3.0, 4.0, 4.0, 4.0]
+    adaptive_ties = [1.1, 1.1, 1.1, 2.1, 2.1, 2.1, 2.9, 2.9, 2.9, 4.1, 4.1, 4.1]
+    diag_ties = calculate_diagnostics(fixed_ties, adaptive_ties)
+    assert diag_ties.n_valid == 12
+    assert not math.isnan(diag_ties.wilcoxon_p_value)
+
+    # Edge Case 3: Heavy censoring (Valid < MIN_VALID_N)
+    # MIN_VALID_N is 10 by default
+    fixed_heavy = [1.0] * 5 + [math.inf] * 15
+    adaptive_heavy = [1.1] * 5 + [math.inf] * 15
+    diag_heavy = calculate_diagnostics(fixed_heavy, adaptive_heavy)
+    assert diag_heavy.n_valid == 5
+    assert diag_heavy.n_censored == 15
+    assert math.isnan(diag_heavy.wilcoxon_p_value)
+
+    # Edge Case 4: All-censored arms
+    fixed_all = [math.inf] * 20
+    adaptive_all = [math.inf] * 20
+    diag_all = calculate_diagnostics(fixed_all, adaptive_all)
+    assert diag_all.n_valid == 0
+    assert diag_all.n_censored == 20
+    assert math.isnan(diag_all.shapiro_statistic)
+
+    # Edge Case 5: Asymmetric censoring
+    fixed_asym = [1.0] * 10 + [math.inf] * 10
+    adaptive_asym = [1.1] * 18 + [math.inf] * 2
+    diag_asym = calculate_diagnostics(fixed_asym, adaptive_asym)
+    assert diag_asym.n_censored == 10  # 10 pairs have at least one censored
+    assert diag_asym.n_valid == 10
