@@ -27,11 +27,18 @@ class CheckResult:
     remediation: str = ""
 
 
+def get_project_root() -> Path:
+    """Determine the root directory of the ARL project."""
+    # Assuming this file is at src/adaptive_rl/diagnostics/doctor.py
+    return Path(__file__).resolve().parent.parent.parent.parent
+
+
 class SystemDoctor:
     """Central diagnostic engine for adaptive-rl doctor command."""
 
     def __init__(self) -> None:
         self.results: List[CheckResult] = []
+        self.project_root = get_project_root()
 
     def run_all_checks(self) -> List[CheckResult]:
         """Runs all registered diagnostic checks."""
@@ -87,16 +94,16 @@ class SystemDoctor:
             else:
                 return CheckResult(
                     category="Hardware Acceleration",
-                    status=CheckStatus.WARN,
-                    message=f"No GPU acceleration found. Falling back to CPU ({threads} threads).",
-                    remediation="If you have an NVIDIA GPU, verify your PyTorch CUDA installation: pip install torch --index-url https://download.pytorch.org/whl/cu118",
+                    status=CheckStatus.PASS,
+                    message=f"No GPU acceleration found. Operating on CPU ({threads} threads).",
+                    remediation="If GPU acceleration is required for your workload, verify your PyTorch installation.",
                 )
         except ImportError:
             return CheckResult(
                 category="Hardware Acceleration",
                 status=CheckStatus.FAIL,
                 message=f"PyTorch is not installed. CPU threads: {threads}",
-                remediation="pip install torch",
+                remediation="Please install the project dependencies (e.g., pip install -e .).",
             )
 
     def check_core_dependencies(self) -> CheckResult:
@@ -120,7 +127,7 @@ class SystemDoctor:
                 category="Core Dependencies",
                 status=CheckStatus.FAIL,
                 message=f"Missing core dependencies: {', '.join(missing)}",
-                remediation=f"pip install {' '.join(missing)}",
+                remediation="Please install the project dependencies (e.g., pip install -e .).",
             )
 
     def check_gui_dependencies(self) -> CheckResult:
@@ -144,21 +151,18 @@ class SystemDoctor:
                 category="GUI/Viz Dependencies",
                 status=CheckStatus.WARN,
                 message=f"Missing optional GUI/Viz dependencies: {', '.join(missing)}",
-                remediation=f"pip install {' '.join(missing)}",
+                remediation="Please install the project's optional GUI dependencies.",
             )
 
     def check_gymnasium_registration(self) -> CheckResult:
         """Verifies drone-3d-v0, drone-6dof, drone_disturbed exist in the registry."""
         try:
             import importlib.util
-
             import gymnasium as gym
 
             if importlib.util.find_spec("adaptive_rl.environments") is not None:
-                try:
-                    __import__("adaptive_rl.environments")
-                except ImportError:
-                    pass
+                # Deliberately surface any ImportError in the environments module
+                __import__("adaptive_rl.environments")
 
             registry_keys = list(gym.envs.registry.keys())
 
@@ -178,12 +182,12 @@ class SystemDoctor:
                     message=f"Missing Gymnasium environments: {', '.join(missing)}",
                     remediation="Check that src/adaptive_rl/environments/__init__.py correctly registers these environments.",
                 )
-        except ImportError:
+        except ImportError as e:
             return CheckResult(
                 category="Environment Registration",
                 status=CheckStatus.FAIL,
-                message="Gymnasium is not installed.",
-                remediation="pip install gymnasium",
+                message=f"Environment registration failed due to import error: {e}",
+                remediation="Fix the import error in adaptive_rl.environments or install project dependencies.",
             )
 
     def check_model_checkpointing(self) -> CheckResult:
@@ -214,7 +218,7 @@ class SystemDoctor:
                 category="Model Checkpointing",
                 status=CheckStatus.FAIL,
                 message="PyTorch is not installed, cannot test checkpointing.",
-                remediation="pip install torch",
+                remediation="Please install the project dependencies.",
             )
         except Exception as e:
             return CheckResult(
@@ -225,25 +229,14 @@ class SystemDoctor:
             )
 
     def check_classical_planner(self) -> CheckResult:
-        """Runs a minimal A* search graph to verify sanity."""
+        """Tests the actual ARL classical planner with a deterministic fixture."""
         try:
-            import heapq
-
-            def minimal_astar() -> bool:
-                start, goal = (0, 0), (1, 1)
-                queue = [(0, start)]
-                visited = set()
-                while queue:
-                    cost, node = heapq.heappop(queue)
-                    if node == goal:
-                        return True
-                    if node in visited:
-                        continue
-                    visited.add(node)
-                    heapq.heappush(queue, (cost + 1, (node[0] + 1, node[1] + 1)))
-                return False
-
-            if minimal_astar():
+            from adaptive_rl.algorithms.planning import AStarPlanner
+            
+            planner = AStarPlanner()
+            # minimal fixture: 2D grid, start (0,0), goal (1,1)
+            path = planner.plan((0,0), (1,1), set())
+            if path and path[-1] == (1,1):
                 return CheckResult(
                     category="Classical Planner",
                     status=CheckStatus.PASS,
@@ -253,24 +246,31 @@ class SystemDoctor:
                 return CheckResult(
                     category="Classical Planner",
                     status=CheckStatus.FAIL,
-                    message="A* search failed to find trivial path.",
-                    remediation="Check planner logic in adaptive_rl/algorithms.",
+                    message="Planner failed to find trivial path.",
+                    remediation="Check planner logic in adaptive_rl/algorithms/planning.py.",
                 )
+        except ImportError as e:
+            return CheckResult(
+                category="Classical Planner",
+                status=CheckStatus.FAIL,
+                message=f"Could not import ARL classical planner: {e}",
+                remediation="Ensure adaptive_rl.algorithms.planning is implemented and accessible.",
+            )
         except Exception as e:
             return CheckResult(
                 category="Classical Planner",
                 status=CheckStatus.FAIL,
                 message=f"Error in classical planner sanity check: {e}",
-                remediation="Ensure required modules are installed.",
+                remediation="Check planner logic for errors.",
             )
 
     def check_git_health(self) -> CheckResult:
         """Queries valid commit SHA, detached HEAD state, and dirty working tree."""
         try:
-            subprocess.run(["git", "--version"], capture_output=True, check=True)
+            subprocess.run(["git", "--version"], capture_output=True, check=True, cwd=self.project_root)
 
             sha_result = subprocess.run(
-                ["git", "rev-parse", "HEAD"], capture_output=True, text=True
+                ["git", "rev-parse", "HEAD"], capture_output=True, text=True, cwd=self.project_root
             )
             if sha_result.returncode != 0:
                 return CheckResult(
@@ -281,12 +281,12 @@ class SystemDoctor:
                 )
 
             branch_result = subprocess.run(
-                ["git", "branch", "--show-current"], capture_output=True, text=True
+                ["git", "branch", "--show-current"], capture_output=True, text=True, cwd=self.project_root
             )
             is_detached = branch_result.stdout.strip() == ""
 
             status_result = subprocess.run(
-                ["git", "status", "--porcelain"], capture_output=True, text=True
+                ["git", "status", "--porcelain"], capture_output=True, text=True, cwd=self.project_root
             )
             is_dirty = bool(status_result.stdout.strip())
 
@@ -329,7 +329,7 @@ class SystemDoctor:
         failed_dirs = []
 
         for d in dirs_to_check:
-            path = Path(d)
+            path = self.project_root / d
             try:
                 path.mkdir(parents=True, exist_ok=True)
                 test_file = path / ".write_test"
@@ -348,7 +348,7 @@ class SystemDoctor:
             return CheckResult(
                 category="I/O Permissions",
                 status=CheckStatus.FAIL,
-                message=f"Missing write permissions for: {', '.join(failed_dirs)}",
+                message=f"Missing write permissions for: {', '.join(failed_dirs)} in {self.project_root}",
                 remediation="Check folder permissions or run with appropriate access.",
             )
 
@@ -361,10 +361,10 @@ class SystemDoctor:
                 category="YAML Configs",
                 status=CheckStatus.FAIL,
                 message="PyYAML is not installed.",
-                remediation="pip install pyyaml",
+                remediation="Please install the project dependencies.",
             )
 
-        config_dir = Path("configs")
+        config_dir = self.project_root / "configs"
         if not config_dir.exists():
             return CheckResult(
                 category="YAML Configs",
@@ -373,9 +373,7 @@ class SystemDoctor:
                 remediation="Create a configs/ directory for your configuration files.",
             )
 
-        yaml_files = glob.glob("configs/**/*.yaml", recursive=True) + glob.glob(
-            "configs/**/*.yml", recursive=True
-        )
+        yaml_files = list(config_dir.rglob("*.yaml")) + list(config_dir.rglob("*.yml"))
 
         if not yaml_files:
             return CheckResult(
@@ -391,7 +389,7 @@ class SystemDoctor:
                 with open(file, "r") as f:
                     yaml.safe_load(f)
             except Exception as e:
-                failed_files.append((file, str(e)))
+                failed_files.append((str(file), str(e)))
 
         if not failed_files:
             return CheckResult(
@@ -400,7 +398,7 @@ class SystemDoctor:
                 message=f"Successfully validated {len(yaml_files)} YAML configurations.",
             )
         else:
-            error_details = "; ".join([f"{f}: {e}" for f, e in failed_files])
+            error_details = "; ".join([f"{Path(f).name}: {e}" for f, e in failed_files])
             return CheckResult(
                 category="YAML Configs",
                 status=CheckStatus.FAIL,

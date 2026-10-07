@@ -7,8 +7,9 @@ from adaptive_rl.diagnostics.doctor import CheckStatus, SystemDoctor
 
 
 @pytest.fixture
-def doctor():
-    return SystemDoctor()
+def doctor(tmp_path):
+    with patch("adaptive_rl.diagnostics.doctor.get_project_root", return_value=tmp_path):
+        return SystemDoctor()
 
 
 def test_check_python_version_pass(doctor):
@@ -47,7 +48,7 @@ def test_check_hardware_acceleration_cpu_only(doctor):
         torch.backends = MagicMock()
         torch.backends.mps.is_available.return_value = False
         result = doctor.check_hardware_acceleration()
-        assert result.status == CheckStatus.WARN
+        assert result.status == CheckStatus.PASS
         assert "CPU" in result.message
 
 
@@ -90,6 +91,20 @@ def test_check_gymnasium_registration_fail(doctor):
         assert result.status == CheckStatus.FAIL
         assert "drone-3d-v0" in result.message
 
+def test_check_gymnasium_registration_fail_import(doctor):
+    def mock_import(name, *args, **kwargs):
+        if name == "adaptive_rl.environments":
+            raise ImportError("Bad env")
+        return MagicMock()
+
+    with patch.dict("sys.modules", {"gymnasium": MagicMock()}):
+        import gymnasium as gym
+        gym.envs.registry.keys.return_value = ["drone-3d-v0", "drone-6dof", "drone_disturbed"]
+        
+        with patch("builtins.__import__", side_effect=mock_import):
+            result = doctor.check_gymnasium_registration()
+            assert result.status == CheckStatus.FAIL
+            assert "Bad env" in result.message
 
 def test_check_model_checkpointing_fail(doctor):
     with patch.dict("sys.modules", {"torch": MagicMock()}):
@@ -102,20 +117,29 @@ def test_check_model_checkpointing_fail(doctor):
 
 
 def test_check_classical_planner_pass(doctor):
+    mock_planner_cls = MagicMock()
+    mock_planner = mock_planner_cls.return_value
+    mock_planner.plan.return_value = [(0,0), (1,1)]
+    
+    with patch.dict("sys.modules", {"adaptive_rl.algorithms.planning": MagicMock(AStarPlanner=mock_planner_cls)}):
+        result = doctor.check_classical_planner()
+        assert result.status == CheckStatus.PASS
+
+def test_check_classical_planner_fail_import(doctor):
+    # Tests that when the real planner doesn't exist, it fails properly
     result = doctor.check_classical_planner()
+    assert result.status == CheckStatus.FAIL
+    assert "Could not import ARL classical planner" in result.message
+
+def test_check_io_permissions_pass(doctor, tmp_path):
+    # doctor project_root is already tmp_path via fixture
+    result = doctor.check_io_permissions()
     assert result.status == CheckStatus.PASS
 
 
-def test_check_io_permissions_pass(doctor, tmp_path):
-    with patch("adaptive_rl.diagnostics.doctor.Path", return_value=tmp_path):
-        result = doctor.check_io_permissions()
-        assert result.status == CheckStatus.PASS
-
-
-def test_check_yaml_configs_warn(doctor):
-    with patch("glob.glob", return_value=[]):
-        result = doctor.check_yaml_configs()
-        assert result.status == CheckStatus.WARN
+def test_check_yaml_configs_warn(doctor, tmp_path):
+    result = doctor.check_yaml_configs()
+    assert result.status == CheckStatus.WARN
 
 
 def test_json_export_and_dict(doctor):
