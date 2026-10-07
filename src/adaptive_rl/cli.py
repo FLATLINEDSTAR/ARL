@@ -1815,5 +1815,64 @@ def gui(
         console.print("\n[yellow]GUI server stopped.[/yellow]")
 
 
+@app.command(name="doctor")
+def doctor_cmd(
+    json_output: bool = typer.Option(
+        False, "--json", help="Export machine-readable diagnostic report in JSON format."
+    ),
+) -> None:
+    """Run a comprehensive full-system diagnostic health check."""
+    import json
+    import sys
+
+    from adaptive_rl.diagnostics.doctor import CheckStatus, SystemDoctor
+
+    doctor = SystemDoctor()
+    results = doctor.run_all_checks()
+
+    if json_output:
+        report = doctor.to_dict()
+        print(json.dumps(report, indent=2))
+        has_critical_failure = any(r.status == CheckStatus.FAIL for r in results)
+        sys.exit(1 if has_critical_failure else 0)
+
+    console.print(
+        Panel.fit(
+            "[bold cyan]Adaptive-RL System Doctor[/bold cyan]\n"
+            "Running comprehensive environment diagnostics...",
+            border_style="cyan",
+        )
+    )
+
+    has_critical_failure = False
+
+    for r in results:
+        if r.status == CheckStatus.PASS:
+            icon = "[bold green]✓[/bold green]"
+            msg_style = "green"
+        elif r.status == CheckStatus.WARN:
+            icon = "[bold yellow]![/bold yellow]"
+            msg_style = "yellow"
+        else:
+            icon = "[bold red]✗[/bold red]"
+            msg_style = "red"
+            has_critical_failure = True
+
+        console.print(f"{icon} [bold]{r.category}[/bold]: [{msg_style}]{r.message}[/{msg_style}]")
+        if r.remediation and r.status != CheckStatus.PASS:
+            console.print(f"   [dim]Remediation: {r.remediation}[/dim]")
+
+    summary = doctor.to_dict()
+    color = "green" if not has_critical_failure else "red"
+    console.print(
+        Panel.fit(
+            f"Diagnostic Complete: {summary['passed']} passed, {summary['warnings']} warnings, {summary['failed']} failed",
+            border_style=color,
+        )
+    )
+
+    sys.exit(1 if has_critical_failure else 0)
+
+
 if __name__ == "__main__":
     app()
